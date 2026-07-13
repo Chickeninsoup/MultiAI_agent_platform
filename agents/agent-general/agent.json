@@ -1,0 +1,29 @@
+{
+  "id": "agent-general",
+  "name": "General Purpose Agent",
+  "description": "A reusable general-purpose agent for research, repository analysis, coding, and documentation tasks.",
+  "owner": "kevin",
+  "status": "ready",
+  "role": "general",
+  "default_model": "claude-model-placeholder",
+  "credential_id": "credential-kevin-claude",
+  "system_prompt_path": "system-prompt.md",
+  "tool_policy_path": "tool-policy.json",
+  "default_workspace_id": "workspace-main",
+  "capabilities": [
+    "research",
+    "repository_analysis",
+    "code_generation",
+    "code_editing",
+    "documentation"
+  ],
+  "limits": {
+    "memory_mb": 512,
+    "cpus": 1,
+    "timeout_seconds": 1800,
+    "max_input_tokens": 50000,
+    "max_output_tokens": 10000
+  },
+  "created_at": "2026-07-13T00:00:00Z",
+  "updated_at": "2026-07-13T00:00:00Z"
+}
