@@ -1,9 +1,9 @@
-# Run Summary Placeholder
+# Run Summary
 
 - Run ID: `run-001`
 - Agent ID: `agent-general`
-- Status: `in_progress`
-- Summary: This Run has not been completed yet.
-- Important findings: None recorded.
-- Decisions made: None recorded.
-- Remaining work: Complete the Run and replace this placeholder.
+- Status: `completed`
+- Summary: The initial task execution workflow completed successfully.
+- Important findings: Task and Run metadata can be read and updated.
+- Decisions made: Continue using file-based JSON metadata for the prototype.
+- Remaining work: Append this summary to the Task background.
