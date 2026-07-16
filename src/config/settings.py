@@ -1,0 +1,196 @@
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+from dotenv import load_dotenv
+
+
+ExecutionMode = Literal["simulated", "llm"]
+LLMProviderName = Literal["anthropic"]
+
+
+def _require_non_empty(
+    value: str | None,
+    variable_name: str,
+) -> str:
+    if value is None or not value.strip():
+        raise ValueError(
+            f"Environment variable {variable_name} "
+            "must be set and non-empty"
+        )
+
+    return value.strip()
+
+
+def _read_positive_int(
+    variable_name: str,
+    default: int,
+) -> int:
+    raw_value = os.getenv(variable_name)
+
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            f"Environment variable {variable_name} "
+            "must be an integer"
+        ) from error
+
+    if value <= 0:
+        raise ValueError(
+            f"Environment variable {variable_name} "
+            "must be positive"
+        )
+
+    return value
+
+
+def _read_non_negative_int(
+    variable_name: str,
+    default: int,
+) -> int:
+    raw_value = os.getenv(variable_name)
+
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            f"Environment variable {variable_name} "
+            "must be an integer"
+        ) from error
+
+    if value < 0:
+        raise ValueError(
+            f"Environment variable {variable_name} "
+            "must not be negative"
+        )
+
+    return value
+
+
+def _read_positive_float(
+    variable_name: str,
+    default: float,
+) -> float:
+    raw_value = os.getenv(variable_name)
+
+    if raw_value is None:
+        return default
+
+    try:
+        value = float(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            f"Environment variable {variable_name} "
+            "must be a number"
+        ) from error
+
+    if value <= 0:
+        raise ValueError(
+            f"Environment variable {variable_name} "
+            "must be positive"
+        )
+
+    return value
+
+
+@dataclass(frozen=True)
+class Settings:
+    execution_mode: ExecutionMode
+    llm_provider: LLMProviderName
+    anthropic_api_key: str | None
+    anthropic_model: str
+    llm_timeout_seconds: float
+    llm_max_retries: int
+    llm_max_tokens: int
+
+    @classmethod
+    def load(
+        cls,
+        env_file: Path | None = None,
+    ) -> "Settings":
+        if env_file is not None:
+            load_dotenv(
+                dotenv_path=env_file,
+                override=False,
+            )
+        else:
+            load_dotenv(override=False)
+
+        execution_mode_raw = os.getenv(
+            "EXECUTION_MODE",
+            "simulated",
+        ).strip().lower()
+
+        if execution_mode_raw not in {
+            "simulated",
+            "llm",
+        }:
+            raise ValueError(
+                "EXECUTION_MODE must be either "
+                "'simulated' or 'llm'"
+            )
+
+        llm_provider_raw = os.getenv(
+            "LLM_PROVIDER",
+            "anthropic",
+        ).strip().lower()
+
+        if llm_provider_raw != "anthropic":
+            raise ValueError(
+                "LLM_PROVIDER currently supports only "
+                "'anthropic'"
+            )
+
+        anthropic_api_key = os.getenv(
+            "ANTHROPIC_API_KEY"
+        )
+
+        anthropic_model = os.getenv(
+            "ANTHROPIC_MODEL",
+            os.getenv(
+                "CLAUDE_MODEL",
+                "claude-sonnet-5",
+            ),
+        ).strip()
+
+        if not anthropic_model:
+            raise ValueError(
+                "ANTHROPIC_MODEL must not be empty"
+            )
+
+        if execution_mode_raw == "llm":
+            anthropic_api_key = _require_non_empty(
+                anthropic_api_key,
+                "ANTHROPIC_API_KEY",
+            )
+
+        return cls(
+            execution_mode=execution_mode_raw,
+            llm_provider=llm_provider_raw,
+            anthropic_api_key=anthropic_api_key,
+            anthropic_model=anthropic_model,
+            llm_timeout_seconds=_read_positive_float(
+                "LLM_TIMEOUT_SECONDS",
+                60.0,
+            ),
+            llm_max_retries=_read_non_negative_int(
+                "LLM_MAX_RETRIES",
+                2,
+            ),
+            llm_max_tokens=_read_positive_int(
+                "LLM_MAX_TOKENS",
+                4096,
+            ),
+        )
+
+    @property
+    def uses_llm(self) -> bool:
+        return self.execution_mode == "llm"
