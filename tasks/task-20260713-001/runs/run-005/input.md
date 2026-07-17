@@ -1,0 +1,13 @@
+审查当前 AI Agent Platform 的架构。
+
+请重点分析：
+
+1. Task、Run 和 Agent 的职责是否清晰。
+2. Repository、RunService、Executor 和 LLM Provider 的分层是否合理。
+3. RunContextBuilder 当前实现的优势和风险。
+4. 当前系统距离真正的多轮 Agent 工具执行还缺少什么。
+5. 给出接下来三个最重要的实现优先级。
+
+必须引用所提供上下文中的真实文件名、类名或方法名作为依据。
+不要虚构未提供的文件或功能。
+请用中文完成完整分析。

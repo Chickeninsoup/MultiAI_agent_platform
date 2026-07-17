@@ -1,0 +1,28 @@
+{
+  "id": "run-006",
+  "task_id": "task-20260713-001",
+  "agent_id": "agent-general",
+  "status": "pending",
+  "created_at": "2026-07-17T00:00:00Z",
+  "updated_at": "2026-07-17T12:10:16Z",
+  "started_at": null,
+  "completed_at": null,
+  "workspace_id": "workspace-main",
+  "input_file": "input.md",
+  "output_file": "output.md",
+  "summary_file": "summary.md",
+  "context_files": [
+    "src/main.py",
+    "src/models.py",
+    "src/repositories.py",
+    "src/execution.py",
+    "src/context_builder.py",
+    "src/run_service.py",
+    "src/llm_executor.py",
+    "src/executor_factory.py",
+    "src/config/settings.py",
+    "src/llm/base.py",
+    "src/llm/types.py",
+    "src/llm/anthropic_provider.py"
+  ]
+}

@@ -1,33 +1,42 @@
 import argparse
 from pathlib import Path
 
+from src.config.settings import Settings
+from src.context_builder import RunContextBuilder
+from src.executor_factory import create_run_executor
 from src.repositories import (
     AgentRepository,
     RunRepository,
     TaskRepository,
 )
-
 from src.run_service import RunService
-from src.config.settings import Settings
-from src.executor_factory import create_run_executor
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = PROJECT_ROOT / "tasks"
 AGENTS_DIR = PROJECT_ROOT / "agents"
-
 ENV_FILE = PROJECT_ROOT / ".env"
+
+settings = Settings.load(ENV_FILE)
 
 task_repository = TaskRepository(TASKS_DIR)
 run_repository = RunRepository(TASKS_DIR)
 agent_repository = AgentRepository(AGENTS_DIR)
 
-settings = Settings.load(ENV_FILE)
+context_builder = RunContextBuilder(
+    project_root=PROJECT_ROOT,
+    task_repository=task_repository,
+    run_repository=run_repository,
+    agent_repository=agent_repository,
+)
+
 executor = create_run_executor(settings)
 
 run_service = RunService(
     task_repository=task_repository,
     run_repository=run_repository,
     agent_repository=agent_repository,
+    context_builder=context_builder,
     executor=executor,
 )
 
@@ -50,7 +59,9 @@ def list_tasks() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Manage tasks and runs in the AI agent platform."
+        description=(
+            "Manage tasks and runs in the AI agent platform."
+        )
     )
 
     subparsers = parser.add_subparsers(
@@ -85,7 +96,7 @@ def main() -> None:
             list_tasks()
         elif args.command == "run":
             run_service.execute(args.task_id)
-    except (FileNotFoundError, ValueError, KeyError) as error:
+    except (FileNotFoundError, ValueError, KeyError, RuntimeError) as error:
         parser.exit(
             status=1,
             message=f"Error: {error}\n",
@@ -94,4 +105,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

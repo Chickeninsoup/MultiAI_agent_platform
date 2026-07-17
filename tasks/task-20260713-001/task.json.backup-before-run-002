@@ -1,0 +1,31 @@
+{
+  "id": "task-20260713-001",
+  "title": "Build the initial task and run management workflow",
+  "description": "Create the first formal task, execute it through one or more runs, and preserve run summaries in the task background.",
+  "workspace_id": "workspace-main",
+  "status": "in_progress",
+  "priority": "medium",
+  "created_by": "user",
+  "assigned_agents": [
+    "agent-general"
+  ],
+  "created_at": "2026-07-13T00:00:00Z",
+  "updated_at": "2026-07-13T13:37:25Z",
+  "started_at": "2026-07-13T00:00:00Z",
+  "completed_at": null,
+  "abandoned_at": null,
+  "current_run_id": "run-001",
+  "run_count": 1,
+  "completion_criteria": [
+    "The task can contain multiple independent runs.",
+    "Each run records the agent used for that execution.",
+    "Each completed run produces an output file.",
+    "Each completed run produces a placeholder summary.",
+    "The run summary can be appended to the task background."
+  ],
+  "tags": [
+    "task-management",
+    "run-management",
+    "prototype"
+  ]
+}

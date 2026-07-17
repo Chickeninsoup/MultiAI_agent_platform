@@ -1,7 +1,11 @@
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 
-from src.models import AgentDefinition, RunDefinition, TaskDefinition
+from src.models import (
+    AgentDefinition,
+    RunDefinition,
+    TaskDefinition,
+)
 
 
 @dataclass(frozen=True)
@@ -10,6 +14,10 @@ class RunExecutionContext:
     run: RunDefinition
     agent: AgentDefinition
     run_input: str
+    agent_system_prompt: str = ""
+    task_background: str = ""
+    tool_policy: dict[str, Any] = field(default_factory=dict)
+    project_snapshot: str = ""
 
 
 @dataclass(frozen=True)

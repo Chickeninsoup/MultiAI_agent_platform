@@ -1,7 +1,8 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from src.execution import RunExecutionContext, RunExecutor
+from src.context_builder import RunContextBuilder
+from src.execution import RunExecutor
 from src.repositories import (
     AgentRepository,
     RunRepository,
@@ -19,18 +20,20 @@ def utc_now() -> str:
 
 
 class RunService:
-    """Coordinate validation, execution, and persistence for one run."""
+    """Coordinate validation, execution, and persistence."""
 
     def __init__(
         self,
         task_repository: TaskRepository,
         run_repository: RunRepository,
         agent_repository: AgentRepository,
+        context_builder: RunContextBuilder,
         executor: RunExecutor,
     ) -> None:
         self._task_repository = task_repository
         self._run_repository = run_repository
         self._agent_repository = agent_repository
+        self._context_builder = context_builder
         self._executor = executor
 
     def execute(self, task_id: str) -> None:
@@ -42,11 +45,11 @@ class RunService:
                 f"Task {task_id} has no current_run_id"
             )
 
-        run = self._run_repository.load(task_id, run_id)
+        run = self._run_repository.load(task.id, run_id)
 
         if run.is_completed():
             raise ValueError(
-                f"Run {run_id} has already been completed"
+                f"Run {run.id} has already been completed"
             )
 
         if run.task_id != task.id:
@@ -68,16 +71,10 @@ class RunService:
                 f"Agent {agent.id} is not ready"
             )
 
-        run_input = self._run_repository.read_input(
-            task.id,
-            run.id,
-        )
-
-        context = RunExecutionContext(
+        context = self._context_builder.build(
             task=task,
             run=run,
             agent=agent,
-            run_input=run_input,
         )
 
         result = self._executor.execute(context)

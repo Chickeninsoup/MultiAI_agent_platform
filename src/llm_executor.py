@@ -5,6 +5,7 @@ from src.execution import (
 from src.llm.base import LLMProvider
 from src.llm.types import LLMMessage, LLMRequest
 
+from src.context_builder import RunContextBuilder
 
 class LLMRunExecutor:
     """Execute a run through a language model provider."""
@@ -36,7 +37,21 @@ class LLMRunExecutor:
     ) -> RunExecutionResult:
         request = self._build_request(context)
         response = self._provider.generate(request)
+            
+        if response.stop_reason == "max_tokens":
+            raise RuntimeError(
+                "LLM response reached the maximum token "
+                "limit before completing. Increase the "
+                "output budget or reduce the requested "
+                "scope."
+            )
 
+        if not response.text.strip():
+            raise RuntimeError(
+                "LLM provider returned no text content. "
+                f"Stop reason: {response.stop_reason}"
+            )
+            
         output = self._build_output(
             context=context,
             response_text=response.text,
@@ -59,6 +74,8 @@ class LLMRunExecutor:
             summary=summary,
         )
 
+
+
     def _build_request(
         self,
         context: RunExecutionContext,
@@ -70,32 +87,83 @@ class LLMRunExecutor:
             else self._default_model
         )
 
-        system_prompt = (
-            "You are executing a task as an AI agent.\n\n"
-            f"Agent ID: {context.agent.id}\n"
-            f"Agent name: {context.agent.name}\n"
-            f"Agent role: {context.agent.role}\n"
-            f"Agent description: {context.agent.description}\n\n"
-            "Complete the run based on the supplied task "
-            "and run input."
+        platform_instructions = (
+            "You are executing one run inside an AI agent "
+            "platform.\n\n"
+            "Important execution rules:\n"
+            "1. You do not currently have interactive tools.\n"
+            "2. Do not claim to read, list, modify, or inspect "
+            "anything that is not included in the supplied "
+            "context.\n"
+            "3. Do not emit simulated tool calls.\n"
+            "4. Base all factual conclusions about the project "
+            "only on the supplied project snapshot.\n"
+            "5. Complete the requested work in this response. "
+            "Do not stop after announcing a plan.\n"
+            "6. Clearly distinguish observed facts from "
+            "recommendations or assumptions.\n"
+            "7.By default, Chinese should be used in the responses, "
+            "except when English is required when referring to proper nouns "
+            "or when the user explicitly requests the use of other languages\n"
+        )
+
+        system_prompt_parts = [
+            platform_instructions,
+            (
+                "\nAgent identity:\n"
+                f"- ID: {context.agent.id}\n"
+                f"- Name: {context.agent.name}\n"
+                f"- Role: {context.agent.role}\n"
+                f"- Description: "
+                f"{context.agent.description}\n"
+            ),
+        ]
+
+        if context.agent_system_prompt.strip():
+            system_prompt_parts.extend(
+                [
+                    "\nAgent-specific system prompt:\n",
+                    context.agent_system_prompt.strip(),
+                ]
+            )
+
+        tool_policy_text = (
+            RunContextBuilder.format_tool_policy(
+                context.tool_policy
+            )
+        )
+
+        completion_criteria = "\n".join(
+            f"- {criterion}"
+            for criterion in context.task.completion_criteria
+        )
+
+        background = (
+            context.task_background.strip()
+            or "No task background has been recorded."
         )
 
         user_content = (
+            f"# Task\n\n"
             f"Task ID: {context.task.id}\n"
-            f"Task title: {context.task.title}\n"
-            f"Task description: {context.task.description}\n\n"
-            "Completion criteria:\n"
-            + "\n".join(
-                f"- {criterion}"
-                for criterion
-                in context.task.completion_criteria
-            )
-            + "\n\nRun input:\n"
-            + context.run_input
+            f"Title: {context.task.title}\n"
+            f"Description: {context.task.description}\n\n"
+            f"## Completion Criteria\n\n"
+            f"{completion_criteria}\n\n"
+            f"## Shared Task Background\n\n"
+            f"{background}\n\n"
+            f"## Agent Tool Policy\n\n"
+            f"```json\n{tool_policy_text}\n```\n\n"
+            f"## Current Run Input\n\n"
+            f"{context.run_input.strip()}\n\n"
+            f"{context.project_snapshot}\n\n"
+            "Produce the complete requested result now."
         )
 
         return LLMRequest(
-            system_prompt=system_prompt,
+            system_prompt="\n".join(
+                system_prompt_parts
+            ),
             messages=[
                 LLMMessage(
                     role="user",
@@ -112,7 +180,8 @@ class LLMRunExecutor:
                 "run_id": context.run.id,
                 "agent_id": context.agent.id,
             },
-        )
+        )    
+
 
     @staticmethod
     def _build_output(
