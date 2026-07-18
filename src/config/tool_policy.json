@@ -1,13 +1,9 @@
 {
-  "allowed_tools": ["list_files", "read_file", "git_status", "git_diff"],
-  "denied_tools": [],
-  "network_policy": {
-    "internet_access": false,
-    "allowed_domains": []
-  },
-  "filesystem_policy": {
-    "readable_paths": [],
-    "writable_paths": []
-  },
-  "requires_human_approval": []
+  "default": "deny",
+  "tools": {
+    "list_files": { "enabled": true },
+    "read_file": { "enabled": true },
+    "git_status": { "enabled": true },
+    "git_diff": { "enabled": true }
+  }
 }

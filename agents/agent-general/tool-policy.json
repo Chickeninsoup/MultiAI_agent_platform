@@ -1,37 +1,20 @@
 {
-  "allowed_tools": [
-    "read_files",
-    "list_files",
-    "write_files",
-    "edit_files",
-    "git_status",
-    "git_diff"
-  ],
-  "denied_tools": [
-    "git_push",
-    "delete_repository",
-    "read_host_secrets",
-    "docker_socket_access",
-    "privileged_shell"
-  ],
-  "network_policy": {
-    "internet_access": false,
-    "allowed_domains": []
-  },
-  "filesystem_policy": {
-    "readable_paths": [
-      "/workspace",
-      "/task-data"
-    ],
-    "writable_paths": [
-      "/workspace",
-      "/run-data"
-    ]
-  },
-  "requires_human_approval": [
-    "git_push",
-    "delete_files",
-    "install_system_packages",
-    "external_network_request"
-  ]
+  "default": "deny",
+  "tools": {
+    "list_files": {
+      "enabled": true
+    },
+    "read_file": {
+      "enabled": true,
+      "max_output_chars": 100000
+    },
+    "git_status": {
+      "enabled": true,
+      "max_output_chars": 100000
+    },
+    "git_diff": {
+      "enabled": true,
+      "max_output_chars": 100000
+    }
+  }
 }

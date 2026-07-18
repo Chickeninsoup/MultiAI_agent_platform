@@ -38,6 +38,22 @@ def test_rejects_parent_directory_escape(tmp_path: Path) -> None:
         )
 
 
+def test_rejects_absolute_path_outside_repository(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("secret", encoding="utf-8")
+
+    with pytest.raises(PathSecurityError):
+        resolve_repository_path(
+            repository_root,
+            str(outside_file),
+        )
+
+
 def test_rejects_missing_path(tmp_path: Path) -> None:
     repository_root = tmp_path / "repository"
     repository_root.mkdir()

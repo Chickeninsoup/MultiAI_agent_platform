@@ -2,11 +2,11 @@ from pathlib import Path
 
 
 class PathSecurityError(Exception):
-    """Raised when a requested path escapes the repository."""
+    error_code = "PATH_OUTSIDE_REPOSITORY"
 
 
 class PathNotFoundError(Exception):
-    """Raised when a requested path does not exist."""
+    error_code = "PATH_NOT_FOUND"
 
 
 def resolve_repository_path(
@@ -14,7 +14,6 @@ def resolve_repository_path(
     requested_path: str,
 ) -> Path:
     root = repository_root.expanduser().resolve(strict=True)
-
     candidate = root / requested_path
 
     try:
