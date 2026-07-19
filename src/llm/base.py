@@ -10,7 +10,7 @@ class LLMProvider(Protocol):
     def provider_name(self) -> str:
         ...
 
-    def generate(
+    def complete(
         self,
         request: LLMRequest,
     ) -> LLMResponse:

@@ -1,54 +1,55 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from src.domain.tools.tool_definition import ToolDefinition
 
-MessageRole = Literal["user", "assistant"]
+
+LLMRole = Literal["user", "assistant"]
+
+
+@dataclass(frozen=True)
+class LLMTextBlock:
+    type: Literal["text"]
+    text: str
+
+
+@dataclass(frozen=True)
+class LLMThinkingBlock:
+    type: Literal["thinking"]
+    thinking: str
+    signature: str
+
+
+@dataclass(frozen=True)
+class LLMToolUseBlock:
+    type: Literal["tool_use"]
+    id: str
+    name: str
+    input: dict[str, Any]
+
+
+LLMContentBlock = (
+    LLMTextBlock
+    | LLMThinkingBlock
+    | LLMToolUseBlock
+)
 
 
 @dataclass(frozen=True)
 class LLMMessage:
-    role: MessageRole
-    content: str
-
-    def __post_init__(self) -> None:
-        if not self.content.strip():
-            raise ValueError(
-                "LLM message content must not be empty"
-            )
+    role: LLMRole
+    content: str | list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
 class LLMRequest:
+    system_prompt: str
     messages: list[LLMMessage]
     model: str
     max_tokens: int
-    system_prompt: str | None = None
-    temperature: float | None = None
-    metadata: dict[str, str] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.messages:
-            raise ValueError(
-                "LLM request must contain at least one message"
-            )
-
-        if not self.model.strip():
-            raise ValueError(
-                "LLM request model must not be empty"
-            )
-
-        if self.max_tokens <= 0:
-            raise ValueError(
-                "LLM request max_tokens must be positive"
-            )
-
-        if (
-            self.temperature is not None
-            and not 0.0 <= self.temperature <= 1.0
-        ):
-            raise ValueError(
-                "LLM request temperature must be between 0 and 1"
-            )
+    tools: list[ToolDefinition] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -56,26 +57,64 @@ class LLMUsage:
     input_tokens: int
     output_tokens: int
 
-    def __post_init__(self) -> None:
-        if self.input_tokens < 0:
-            raise ValueError(
-                "Input token count must not be negative"
-            )
-
-        if self.output_tokens < 0:
-            raise ValueError(
-                "Output token count must not be negative"
-            )
-
 
 @dataclass(frozen=True)
 class LLMResponse:
-    text: str
-    provider: str
-    model: str
-    usage: LLMUsage
+    content: list[LLMContentBlock]
     stop_reason: str | None
-    response_id: str | None
-    raw_metadata: dict[str, Any] = field(
-        default_factory=dict
-    )
+    usage: LLMUsage
+
+    @property
+    def text(self) -> str:
+        return "\n".join(
+            block.text
+            for block in self.content
+            if isinstance(block, LLMTextBlock)
+        )
+
+    @property
+    def tool_calls(self) -> list[LLMToolUseBlock]:
+        return [
+            block
+            for block in self.content
+            if isinstance(block, LLMToolUseBlock)
+        ]
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return bool(self.tool_calls)
+
+    def to_message_content(self) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = []
+
+        for block in self.content:
+            if isinstance(block, LLMTextBlock):
+                content.append(
+                    {
+                        "type": "text",
+                        "text": block.text,
+                    }
+                )
+
+            elif isinstance(block, LLMThinkingBlock):
+                content.append(
+                    {
+                        "type": "thinking",
+                        "thinking": block.thinking,
+                        "signature": block.signature,
+                    }
+                )
+
+            elif isinstance(block, LLMToolUseBlock):
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+
+        return content
+
+        

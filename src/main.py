@@ -30,7 +30,11 @@ context_builder = RunContextBuilder(
     agent_repository=agent_repository,
 )
 
-executor = create_run_executor(settings)
+executor = create_run_executor(
+    settings,
+    project_root=PROJECT_ROOT,
+    agent_repository=agent_repository,
+)
 
 run_service = RunService(
     task_repository=task_repository,

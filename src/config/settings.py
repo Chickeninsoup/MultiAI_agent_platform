@@ -110,6 +110,8 @@ class Settings:
     llm_timeout_seconds: float
     llm_max_retries: int
     llm_max_tokens: int
+    llm_max_tool_rounds: int
+    llm_max_total_tokens: int
 
     @classmethod
     def load(
@@ -188,6 +190,14 @@ class Settings:
             llm_max_tokens=_read_positive_int(
                 "LLM_MAX_TOKENS",
                 4096,
+            ),
+            llm_max_tool_rounds=_read_positive_int(
+                "LLM_MAX_TOOL_ROUNDS",
+                8,
+            ),
+            llm_max_total_tokens=_read_positive_int(
+                "LLM_MAX_TOTAL_TOKENS",
+                100_000,
             ),
         )
 
