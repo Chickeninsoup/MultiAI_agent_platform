@@ -82,13 +82,13 @@ class RunService:
         self._run_repository.write_output(
             task.id,
             run.id,
-            result.output,
+            result.output_markdown,
         )
 
         self._run_repository.write_summary(
             task.id,
             run.id,
-            result.summary,
+            result.summary_markdown,
         )
 
         completed_at = utc_now()

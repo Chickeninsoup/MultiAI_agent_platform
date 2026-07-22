@@ -137,6 +137,9 @@ class RunRepository:
     def get_summary_file(self, task_id: str, run_id: str) -> Path:
         return self.get_run_dir(task_id, run_id) / "summary.md"
 
+    def get_events_file(self, task_id: str, run_id: str) -> Path:
+        return self.get_run_dir(task_id, run_id) / "events.jsonl"
+
     def load(
         self,
         task_id: str,

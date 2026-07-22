@@ -1,4 +1,4 @@
-from src.execution import (
+from src.models import (
     RunExecutionContext,
     RunExecutionResult,
 )
@@ -15,8 +15,8 @@ class SimulatedRunExecutor:
         summary = self._build_summary(context)
 
         return RunExecutionResult(
-            output=output,
-            summary=summary,
+            output_markdown=output,
+            summary_markdown=summary,
         )
 
     @staticmethod

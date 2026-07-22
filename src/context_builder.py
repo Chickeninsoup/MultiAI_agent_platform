@@ -1,10 +1,10 @@
 import json
 from pathlib import Path
 
-from src.execution import RunExecutionContext
 from src.models import (
     AgentDefinition,
     RunDefinition,
+    RunExecutionContext,
     TaskDefinition,
 )
 from src.repositories import (

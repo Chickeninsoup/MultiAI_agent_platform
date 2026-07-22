@@ -429,3 +429,21 @@ class RunDefinition:
 
         data.update(self.metadata)
         return data
+
+
+@dataclass(frozen=True)
+class RunExecutionContext:
+    task: TaskDefinition
+    run: RunDefinition
+    agent: AgentDefinition
+    run_input: str
+    agent_system_prompt: str = ""
+    task_background: str = ""
+    tool_policy: dict[str, Any] = field(default_factory=dict)
+    project_snapshot: str = ""
+
+
+@dataclass(frozen=True)
+class RunExecutionResult:
+    output_markdown: str
+    summary_markdown: str

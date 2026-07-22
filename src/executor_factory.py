@@ -1,9 +1,10 @@
+from pathlib import Path
+
 from src.config.settings import Settings
 from src.execution import RunExecutor
-from src.repositories import AgentRepository
+from src.llm.base import LLMProvider
+from src.repositories import AgentRepository, RunRepository
 from src.simulated_executor import SimulatedRunExecutor
-
-from pathlib import Path
 
 from src.services.tools.handlers.git_diff_tool import GitDiffTool
 from src.services.tools.handlers.git_status_tool import GitStatusTool
@@ -12,11 +13,13 @@ from src.services.tools.handlers.read_file_tool import ReadFileTool
 from src.services.tools.tool_executor import ToolExecutor
 from src.services.tools.tool_policy import load_tool_policy
 
+
 def create_run_executor(
-    settings: Settings,
     *,
-    project_root: Path,
+    settings: Settings,
     agent_repository: AgentRepository,
+    run_repository: RunRepository,
+    project_root: Path,
 ) -> RunExecutor:
     """Create a run executor from application settings."""
 
@@ -26,8 +29,9 @@ def create_run_executor(
     if settings.execution_mode == "llm":
         return _create_llm_executor(
             settings,
-            project_root=project_root,
             agent_repository=agent_repository,
+            run_repository=run_repository,
+            project_root=project_root,
         )
 
     raise ValueError(
@@ -39,11 +43,25 @@ def create_run_executor(
 def _create_llm_executor(
     settings: Settings,
     *,
-    project_root: Path,
     agent_repository: AgentRepository,
+    run_repository: RunRepository,
+    project_root: Path,
 ) -> RunExecutor:
+    from src.llm_agent_run_executor import LLMAgentRunExecutor
+
+    provider = create_llm_provider(settings)
+
+    return LLMAgentRunExecutor(
+        provider=provider,
+        settings=settings,
+        agent_repository=agent_repository,
+        run_repository=run_repository,
+        project_root=project_root,
+    )
+
+
+def create_llm_provider(settings: Settings) -> LLMProvider:
     from src.llm.anthropic_provider import AnthropicProvider
-    from src.llm_executor import LLMAgentRunExecutor
 
     if settings.llm_provider != "anthropic":
         raise ValueError(
@@ -59,29 +77,12 @@ def _create_llm_executor(
             "for LLM execution"
         )
 
-    provider = AnthropicProvider(
+    return AnthropicProvider(
         api_key=api_key,
         timeout_seconds=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
     )
 
-    return LLMAgentRunExecutor(
-        provider=provider,
-        agent_repository=agent_repository,
-        repository_root=project_root,
-        tool_executor_factory=(
-            lambda repository_root, agent_directory: (
-                create_tool_executor(
-                    repository_root=repository_root,
-                    agent_directory=agent_directory,
-                )
-            )
-        ),
-        default_model=settings.anthropic_model,
-        default_max_tokens=settings.llm_max_tokens,
-        max_tool_rounds=settings.llm_max_tool_rounds,
-        max_total_tokens=settings.llm_max_total_tokens,
-    )
 
 def create_tool_executor(
     *,

@@ -13,6 +13,7 @@ from src.llm.types import (
     LLMUsage,
 )
 from src.llm_executor import LLMRunExecutor, LLMRunLimitError
+from src.run_events import InMemoryRunEventSink
 
 
 class FakeProvider:
@@ -121,8 +122,31 @@ def test_executes_tool_and_continues_llm_loop() -> None:
 
     result = executor.execute(request)
 
-    assert result.text == "The file contains hello."
+    assert result.final_response.text == "The file contains hello."
     assert provider.call_count == 2
+    assert result.llm_rounds == 2
+    assert result.tool_rounds == 1
+    assert result.tool_calls == 1
+    assert result.total_input_tokens == 10 + 15
+    assert result.total_output_tokens == 5 + 6
+
+    assert [event["type"] for event in result.events] == [
+        "llm_response",
+        "tool_call",
+        "tool_result",
+        "llm_response",
+        "run_completed",
+    ]
+
+    tool_call_event = result.events[1]
+    assert tool_call_event["name"] == "read_file"
+    assert tool_call_event["input"] == {"path": "example.txt"}
+
+    tool_result_event = result.events[2]
+    assert tool_result_event["name"] == "read_file"
+    assert tool_result_event["success"] is True
+    assert tool_result_event["output_chars"] == len("1: hello")
+    assert "output" not in tool_result_event
 
     second_request = provider.requests[1]
 
@@ -182,7 +206,7 @@ def test_tool_failure_is_returned_to_model() -> None:
         max_tokens=100,
     )
 
-    executor.execute(request)
+    result = executor.execute(request)
 
     tool_result_content = (
         provider.requests[1].messages[-1].content
@@ -192,6 +216,12 @@ def test_tool_failure_is_returned_to_model() -> None:
     assert tool_result_content[0]["content"] == (
         "Path does not exist."
     )
+
+    tool_result_event = next(
+        event for event in result.events if event["type"] == "tool_result"
+    )
+    assert tool_result_event["success"] is False
+    assert tool_result_event["error_code"] == "PATH_NOT_FOUND"
 
 
 class InfiniteToolProvider(FakeProvider):
@@ -220,11 +250,14 @@ class InfiniteToolProvider(FakeProvider):
 
 
 def test_rejects_too_many_tool_rounds() -> None:
+    sink = InMemoryRunEventSink()
+
     executor = LLMRunExecutor(
         provider=InfiniteToolProvider(),
         tool_executor=FakeToolExecutor(),
         max_tool_rounds=2,
         max_total_tokens=1000,
+        event_sink=sink,
     )
 
     request = LLMRequest(
@@ -241,3 +274,145 @@ def test_rejects_too_many_tool_rounds() -> None:
 
     with pytest.raises(LLMRunLimitError):
         executor.execute(request)
+
+    event_types = [event["type"] for event in sink.events]
+    assert "run_limit_exceeded" in event_types
+    assert "run_failed" in event_types
+
+    limit_event = next(
+        event
+        for event in sink.events
+        if event["type"] == "run_limit_exceeded"
+    )
+    assert limit_event["limit"] == "max_tool_rounds"
+    assert limit_event["configured_limit"] == 2
+
+    failed_event = next(
+        event for event in sink.events if event["type"] == "run_failed"
+    )
+    assert failed_event["error_type"] == "LLMRunLimitError"
+
+
+class CrashingProvider(FakeProvider):
+    def complete(
+        self,
+        request: LLMRequest,
+    ) -> LLMResponse:
+        self.requests.append(request)
+        self.call_count += 1
+
+        if self.call_count == 1:
+            return LLMResponse(
+                content=[
+                    LLMToolUseBlock(
+                        type="tool_use",
+                        id="toolu_1",
+                        name="read_file",
+                        input={"path": "example.txt"},
+                    )
+                ],
+                stop_reason="tool_use",
+                usage=LLMUsage(
+                    input_tokens=10,
+                    output_tokens=5,
+                ),
+            )
+
+        raise RuntimeError("Simulated provider failure.")
+
+
+def test_events_survive_mid_run_failure() -> None:
+    sink = InMemoryRunEventSink()
+
+    executor = LLMRunExecutor(
+        provider=CrashingProvider(),
+        tool_executor=FakeToolExecutor(),
+        max_tool_rounds=5,
+        max_total_tokens=1000,
+        event_sink=sink,
+    )
+
+    request = LLMRequest(
+        system_prompt="You are an agent.",
+        messages=[
+            LLMMessage(
+                role="user",
+                content="Inspect example.txt.",
+            )
+        ],
+        model="fake-model",
+        max_tokens=100,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Simulated provider failure",
+    ):
+        executor.execute(request)
+
+    event_types = [event["type"] for event in sink.events]
+
+    assert "llm_response" in event_types
+    assert "tool_call" in event_types
+    assert "tool_result" in event_types
+    assert "run_failed" in event_types
+    # the run never reached a normal end, so no run_completed
+    assert "run_completed" not in event_types
+
+
+def test_tool_output_is_not_logged_by_default() -> None:
+    sink = InMemoryRunEventSink()
+
+    executor = LLMRunExecutor(
+        provider=FakeProvider(),
+        tool_executor=FakeToolExecutor(),
+        max_tool_rounds=5,
+        max_total_tokens=1000,
+        event_sink=sink,
+        debug_log_full_output=False,
+    )
+
+    request = LLMRequest(
+        system_prompt="You are an agent.",
+        messages=[
+            LLMMessage(role="user", content="Inspect example.txt."),
+        ],
+        model="fake-model",
+        max_tokens=100,
+    )
+
+    executor.execute(request)
+
+    tool_result_event = next(
+        event for event in sink.events if event["type"] == "tool_result"
+    )
+    assert "output" not in tool_result_event
+
+
+def test_full_tool_output_is_logged_in_debug_mode() -> None:
+    sink = InMemoryRunEventSink()
+
+    executor = LLMRunExecutor(
+        provider=FakeProvider(),
+        tool_executor=FakeToolExecutor(),
+        max_tool_rounds=5,
+        max_total_tokens=1000,
+        event_sink=sink,
+        debug_log_full_output=True,
+    )
+
+    request = LLMRequest(
+        system_prompt="You are an agent.",
+        messages=[
+            LLMMessage(role="user", content="Inspect example.txt."),
+        ],
+        model="fake-model",
+        max_tokens=100,
+    )
+
+    executor.execute(request)
+
+    tool_result_event = next(
+        event for event in sink.events if event["type"] == "tool_result"
+    )
+    assert tool_result_event["output"] == "1: hello"

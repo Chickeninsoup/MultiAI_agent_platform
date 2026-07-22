@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
@@ -57,6 +59,19 @@ class ToolExecutor:
 
     
     def execute(self, tool_call: ToolCall) -> ToolResult:
+        start = time.perf_counter()
+        result = self._execute(tool_call)
+        duration_ms = round((time.perf_counter() - start) * 1000)
+
+        return replace(
+            result,
+            metadata={
+                **result.metadata,
+                "duration_ms": duration_ms,
+            },
+        )
+
+    def _execute(self, tool_call: ToolCall) -> ToolResult:
         handler = self._handlers.get(tool_call.name)
 
         if handler is None:

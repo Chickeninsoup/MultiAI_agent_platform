@@ -71,6 +71,41 @@ def test_executes_registered_enabled_tool(
     assert result.output == "1: alpha\n2: beta"
 
 
+def test_execute_records_duration_ms_for_every_result(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    target_file = repository_root / "example.txt"
+    target_file.write_text("alpha", encoding="utf-8")
+
+    executor = create_executor(repository_root)
+
+    success_result = executor.execute(
+        ToolCall(
+            id="tool-call-1",
+            name="read_file",
+            input={"path": "example.txt"},
+        )
+    )
+
+    assert isinstance(success_result.metadata["duration_ms"], int)
+    assert success_result.metadata["duration_ms"] >= 0
+    # existing handler metadata (e.g. truncated) is preserved alongside it
+    assert "truncated" in success_result.metadata
+
+    failure_result = executor.execute(
+        ToolCall(
+            id="tool-call-2",
+            name="unknown_tool",
+            input={},
+        )
+    )
+
+    assert isinstance(failure_result.metadata["duration_ms"], int)
+
+
 def test_unknown_tool_returns_failure(
     tmp_path: Path,
 ) -> None:

@@ -1,3 +1,4 @@
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +102,29 @@ def _read_positive_float(
     return value
 
 
+def _read_bool(
+    variable_name: str,
+    default: bool,
+) -> bool:
+    raw_value = os.getenv(variable_name)
+
+    if raw_value is None:
+        return default
+
+    normalized = raw_value.strip().lower()
+
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    raise ValueError(
+        f"Environment variable {variable_name} "
+        "must be a boolean (true/false)"
+    )
+
+
 @dataclass(frozen=True)
 class Settings:
     execution_mode: ExecutionMode
@@ -112,6 +136,7 @@ class Settings:
     llm_max_tokens: int
     llm_max_tool_rounds: int
     llm_max_total_tokens: int
+    debug_log_full_output: bool
 
     @classmethod
     def load(
@@ -199,8 +224,13 @@ class Settings:
                 "LLM_MAX_TOTAL_TOKENS",
                 100_000,
             ),
+            debug_log_full_output=_read_bool(
+                "DEBUG_LOG_FULL_OUTPUT",
+                False,
+            ),
         )
 
     @property
     def uses_llm(self) -> bool:
         return self.execution_mode == "llm"
+
