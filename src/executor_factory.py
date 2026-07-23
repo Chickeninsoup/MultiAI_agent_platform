@@ -10,6 +10,7 @@ from src.services.tools.handlers.git_diff_tool import GitDiffTool
 from src.services.tools.handlers.git_status_tool import GitStatusTool
 from src.services.tools.handlers.list_files_tool import ListFilesTool
 from src.services.tools.handlers.read_file_tool import ReadFileTool
+from src.services.tools.handlers.write_file_tool import WriteFileTool
 from src.services.tools.tool_executor import ToolExecutor
 from src.services.tools.tool_policy import load_tool_policy
 
@@ -89,6 +90,7 @@ def create_tool_executor(
     repository_root: Path,
     agent_directory: Path,
     default_max_output_chars: int = 100_000,
+    default_max_write_bytes: int = 100_000,
 ) -> ToolExecutor:
     policy_path = agent_directory / "tool-policy.json"
     tool_policy = load_tool_policy(policy_path)
@@ -100,6 +102,12 @@ def create_tool_executor(
             ReadFileTool(),
             GitStatusTool(),
             GitDiffTool(),
+            WriteFileTool(
+                max_write_bytes=tool_policy.get_max_write_bytes(
+                    "write_file",
+                    default_max_write_bytes,
+                ),
+            ),
         ],
         tool_policy=tool_policy,
         max_output_chars=default_max_output_chars,

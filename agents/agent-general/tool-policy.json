@@ -15,6 +15,9 @@
     "git_diff": {
       "enabled": true,
       "max_output_chars": 100000
+    },
+    "write_file": {
+      "enabled": false
     }
   }
 }

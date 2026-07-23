@@ -16,6 +16,7 @@ class ToolPolicyError(Exception):
 class ToolPolicyEntry:
     enabled: bool
     max_output_chars: int | None = None
+    max_write_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,21 @@ class ToolPolicy:
             and entry.max_output_chars is not None
         ):
             return entry.max_output_chars
+
+        return fallback
+
+    def get_max_write_bytes(
+        self,
+        tool_name: str,
+        fallback: int,
+    ) -> int:
+        entry = self.tools.get(tool_name)
+
+        if (
+            entry is not None
+            and entry.max_write_bytes is not None
+        ):
+            return entry.max_write_bytes
 
         return fallback
 
@@ -127,6 +143,7 @@ def _parse_tool_entry(
     allowed_keys = {
         "enabled",
         "max_output_chars",
+        "max_write_bytes",
     }
     unexpected_keys = set(raw_entry) - allowed_keys
 
@@ -157,7 +174,21 @@ def _parse_tool_entry(
                 "must be a positive integer."
             )
 
+    max_write_bytes = raw_entry.get("max_write_bytes")
+
+    if max_write_bytes is not None:
+        if (
+            not isinstance(max_write_bytes, int)
+            or isinstance(max_write_bytes, bool)
+            or max_write_bytes < 1
+        ):
+            raise ToolPolicyError(
+                f"'max_write_bytes' for '{tool_name}' "
+                "must be a positive integer."
+            )
+
     return ToolPolicyEntry(
         enabled=enabled,
         max_output_chars=max_output_chars,
+        max_write_bytes=max_write_bytes,
     )

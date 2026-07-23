@@ -105,6 +105,64 @@ def test_rejects_invalid_output_limit() -> None:
         )
 
 
+def test_loads_max_write_bytes() -> None:
+    policy = parse_tool_policy(
+        {
+            "default": "deny",
+            "tools": {
+                "write_file": {
+                    "enabled": True,
+                    "max_write_bytes": 2000,
+                }
+            },
+        }
+    )
+
+    assert (
+        policy.get_max_write_bytes(
+            "write_file",
+            fallback=1000,
+        )
+        == 2000
+    )
+
+
+def test_get_max_write_bytes_falls_back_when_unset() -> None:
+    policy = parse_tool_policy(
+        {
+            "default": "deny",
+            "tools": {
+                "write_file": {
+                    "enabled": True,
+                }
+            },
+        }
+    )
+
+    assert (
+        policy.get_max_write_bytes(
+            "write_file",
+            fallback=1000,
+        )
+        == 1000
+    )
+
+
+def test_rejects_invalid_write_size_limit() -> None:
+    with pytest.raises(ToolPolicyError):
+        parse_tool_policy(
+            {
+                "default": "deny",
+                "tools": {
+                    "write_file": {
+                        "enabled": True,
+                        "max_write_bytes": 0,
+                    }
+                },
+            }
+        )
+
+
 def test_rejects_unknown_policy_field() -> None:
     with pytest.raises(ToolPolicyError):
         parse_tool_policy(

@@ -71,3 +71,94 @@ def test_create_tool_executor_loads_agent_policy(
         "read_file",
         "list_files",
     }
+
+
+def test_create_tool_executor_disables_write_file_by_default(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    agent_directory = tmp_path / "agent-general"
+    agent_directory.mkdir()
+
+    policy_path = agent_directory / "tool-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default": "deny",
+                "tools": {
+                    "write_file": {
+                        "enabled": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    executor = create_tool_executor(
+        repository_root=repository_root,
+        agent_directory=agent_directory,
+    )
+
+    tool_names = {
+        definition.name
+        for definition in executor.get_definitions()
+    }
+
+    assert "write_file" not in tool_names
+
+
+def test_create_tool_executor_enables_write_file_for_coder_agent(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    agent_directory = tmp_path / "agent-coder"
+    agent_directory.mkdir()
+
+    policy_path = agent_directory / "tool-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default": "deny",
+                "tools": {
+                    "write_file": {
+                        "enabled": True,
+                        "max_write_bytes": 10,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    executor = create_tool_executor(
+        repository_root=repository_root,
+        agent_directory=agent_directory,
+    )
+
+    tool_names = {
+        definition.name
+        for definition in executor.get_definitions()
+    }
+
+    assert "write_file" in tool_names
+
+    from src.domain.tools.tool_call import ToolCall
+
+    result = executor.execute(
+        ToolCall(
+            id="tool-call-1",
+            name="write_file",
+            input={
+                "path": "too_long.txt",
+                "content": "this content is too long",
+            },
+        )
+    )
+
+    assert result.success is False
+    assert result.error_code == "WRITE_SIZE_LIMIT_EXCEEDED"

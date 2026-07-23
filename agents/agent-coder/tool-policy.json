@@ -1,0 +1,24 @@
+{
+  "default": "deny",
+  "tools": {
+    "list_files": {
+      "enabled": true
+    },
+    "read_file": {
+      "enabled": true,
+      "max_output_chars": 100000
+    },
+    "git_status": {
+      "enabled": true,
+      "max_output_chars": 100000
+    },
+    "git_diff": {
+      "enabled": true,
+      "max_output_chars": 100000
+    },
+    "write_file": {
+      "enabled": true,
+      "max_write_bytes": 100000
+    }
+  }
+}
