@@ -1,0 +1,10 @@
+{
+  "id": "run-001",
+  "task_id": "task-patch-test",
+  "agent_id": "agent-coder",
+  "status": "completed",
+  "created_at": "2026-07-23T00:00:00Z",
+  "updated_at": "2026-07-23T10:06:57Z",
+  "started_at": "2026-07-23T00:00:00Z",
+  "completed_at": "2026-07-23T10:06:57Z"
+}

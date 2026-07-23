@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import hashlib
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from src.domain.tools.tool_definition import ToolDefinition
 from src.domain.tools.tool_result import ToolResult
+from src.services.tools.file_writer import (
+    atomic_write_text,
+    calculate_sha256,
+)
 from src.services.tools.handlers.read_file_tool import (
     InvalidToolInputError,
 )
@@ -160,14 +161,19 @@ class WriteFileTool:
                 f"Path is not a regular file: {parsed_input.path}"
             )
 
-        before_sha256 = (
-            hashlib.sha256(target_path.read_bytes()).hexdigest()
+        old_content = (
+            target_path.read_text(encoding="utf-8")
             if target_exists
             else None
         )
-        after_sha256 = hashlib.sha256(encoded_content).hexdigest()
+        before_sha256 = (
+            calculate_sha256(old_content)
+            if old_content is not None
+            else None
+        )
+        after_sha256 = calculate_sha256(parsed_input.content)
 
-        self._atomic_write_text(
+        atomic_write_text(
             target_path=target_path,
             content=parsed_input.content,
         )
@@ -210,37 +216,6 @@ class WriteFileTool:
                 f"Writing to sensitive path is not allowed: "
                 f"{relative_path}"
             )
-
-    @staticmethod
-    def _atomic_write_text(
-        *,
-        target_path: Path,
-        content: str,
-    ) -> None:
-        file_descriptor, temporary_name = tempfile.mkstemp(
-            dir=target_path.parent,
-            prefix=f".{target_path.name}.",
-            suffix=".tmp",
-            text=True,
-        )
-
-        temporary_path = Path(temporary_name)
-
-        try:
-            with os.fdopen(
-                file_descriptor,
-                "w",
-                encoding="utf-8",
-                newline="",
-            ) as temporary_file:
-                temporary_file.write(content)
-                temporary_file.flush()
-                os.fsync(temporary_file.fileno())
-
-            os.replace(temporary_path, target_path)
-        except Exception:
-            temporary_path.unlink(missing_ok=True)
-            raise
 
     @staticmethod
     def validate_input(

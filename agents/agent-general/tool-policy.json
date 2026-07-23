@@ -18,6 +18,9 @@
     },
     "write_file": {
       "enabled": false
+    },
+    "patch_file": {
+      "enabled": false
     }
   }
 }

@@ -9,6 +9,7 @@ from src.simulated_executor import SimulatedRunExecutor
 from src.services.tools.handlers.git_diff_tool import GitDiffTool
 from src.services.tools.handlers.git_status_tool import GitStatusTool
 from src.services.tools.handlers.list_files_tool import ListFilesTool
+from src.services.tools.handlers.patch_file_tool import PatchFileTool
 from src.services.tools.handlers.read_file_tool import ReadFileTool
 from src.services.tools.handlers.write_file_tool import WriteFileTool
 from src.services.tools.tool_executor import ToolExecutor
@@ -108,6 +109,7 @@ def create_tool_executor(
                     default_max_write_bytes,
                 ),
             ),
+            PatchFileTool(),
         ],
         tool_policy=tool_policy,
         max_output_chars=default_max_output_chars,

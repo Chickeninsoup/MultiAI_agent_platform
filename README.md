@@ -27,7 +27,7 @@
 
 ## 工具调用能力（当前重点）
 
-Agent 在 `llm` 模式下有 4 个只读工具，外加一个默认关闭、只对 `agent-coder` 开放的写文件工具：
+Agent 在 `llm` 模式下有 4 个只读工具，外加两个默认关闭、只对 `agent-coder` 开放的写入类工具：
 
 | 工具 | 作用 |
 |---|---|
@@ -36,11 +36,13 @@ Agent 在 `llm` 模式下有 4 个只读工具，外加一个默认关闭、只�
 | `git_status` | 查看当前分支和工作区状态（`git status --short --branch`） |
 | `git_diff` | 查看未暂存或已暂存的改动（`git diff`） |
 | `write_file` | 在仓库内创建（`mode: create`）或整篇覆盖（`mode: overwrite`）一个 UTF-8 文本文件；只在 `agents/agent-coder/tool-policy.json` 里 `enabled: true`，`agent-general` 保持关闭 |
+| `patch_file` | 把文件里某一段**精确且唯一**的 `old_text` 替换成 `new_text`（`new_text` 可以是空字符串，表示删除）；`old_text` 在文件里不存在或出现不止一次都会直接失败，不会猜测意图。同样只在 `agent-coder` 开放。 |
 
 **关键设计点**：
 
-- 所有工具都通过 `PathGuard`（`src/services/tools/path_guard.py`）做路径边界检查——请求路径必须解析到仓库根目录以内，拒绝 `../` 逃逸和软链接逃逸；`write_file` 额外用 `resolve_repository_write_path()` 处理目标文件尚不存在的情况（不自动创建父目录，父目录本身的软链接逃逸也会被拒绝）。
+- 所有工具都通过 `PathGuard`（`src/services/tools/path_guard.py`）做路径边界检查——请求路径必须解析到仓库根目录以内，拒绝 `../` 逃逸和软链接逃逸；`write_file`/`patch_file` 都额外用 `resolve_repository_write_path()` 处理目标文件尚不存在的情况（不自动创建父目录，父目录本身的软链接逃逸也会被拒绝）。
 - `write_file` 不会自动覆盖：`create` 遇到已存在的文件直接报错，`overwrite` 遇到不存在的文件也直接报错，两种模式语义互不兼容；写入内容有按字节数的上限（`max_write_bytes`），`.git`/`.env`/私钥/虚拟环境等敏感路径永远拒绝；实际落盘用 `mkstemp` + `fsync` + `os.replace` 做原子替换，避免进程中途崩溃留下半个文件。
+- `patch_file`（`src/services/tools/handlers/patch_file_tool.py`）设计成不做 preview-then-apply 两阶段（会有 TOCTOU 风险：预览之后、真正写入之前文件可能已被改动），而是一次 `apply_patch()` 调用里完成"读取→用 `content.count(old_text)` 校验唯一匹配→拼接新内容→写入"的全过程。`write_file` 和 `patch_file` 共享同一份写入内核（`src/services/tools/file_writer.py` 的 `calculate_sha256()`/`atomic_write_text()`），避免两个工具的原子写入逻辑各自实现、逐渐漂移。
 - 每个 Agent 有自己独立的 `tool-policy.json`（`default: allow/deny` + 每个工具的 `enabled`/`max_output_chars`/`max_write_bytes`），决定它能用哪些工具、单次工具输出最多多少字符、单次写入最多多少字节。
 - `ToolExecutor`（`src/services/tools/tool_executor.py`）是统一调度层：按名字找 handler、按策略校验是否启用、捕获异常统一转成失败态 `ToolResult`，不会让一次工具调用失败直接炸掉整个 Run。
 - `LLMRunExecutor`（`src/llm_executor.py`）实现真正的**多轮工具调用循环**：请求模型 → 如果模型要调用工具就执行 → 把工具结果作为下一轮消息喂回去 → 再次请求，直到模型给出最终文本回答。有 `max_tool_rounds`（默认 8 轮）和 `max_total_tokens`（默认 100000）两道保险，防止死循环或失控的开销。
@@ -81,18 +83,19 @@ tail -f tasks/<task-id>/runs/<run-id>/events.jsonl
 
 ### File mutation 审计
 
-写入类工具（目前是 `write_file`）成功执行后，`events.jsonl` 里除了通用的 `tool_result`，还会额外多记一条 `file_mutation`：
+写入类工具（`write_file`/`patch_file`）成功执行后，`events.jsonl` 里除了通用的 `tool_result`，还会额外多记一条 `file_mutation`：
 
 ```jsonl
 {"type": "file_mutation", "round": 1, "tool_call_id": "toolu_...", "operation": "create", "path": "src/example.py", "before_sha256": null, "after_sha256": "9f86d0...", "bytes_written": 13}
+{"type": "file_mutation", "round": 2, "tool_call_id": "toolu_...", "operation": "patch", "path": "sandbox/hello.py", "before_sha256": "61f542f8...", "after_sha256": "726eb477...", "bytes_written": 38}
 ```
 
-- `operation`：`create` 或 `overwrite`。
-- `before_sha256`：写入前文件内容的 sha256；`create` 场景下没有旧文件，恒为 `null`。
+- `operation`：`write_file` 是 `create`/`overwrite`，`patch_file` 恒为 `patch`。
+- `before_sha256`：写入前文件内容的 sha256；`write_file` 的 `create` 场景没有旧文件，恒为 `null`。
 - `after_sha256`：写入后文件内容的 sha256。
 - `bytes_written`：写入的 UTF-8 字节数（不是字符数）。
 
-`LLMRunExecutor`（`src/llm_executor.py`）判断是否要发这条事件，看的是 `ToolResult.metadata` 里有没有 `after_sha256` 这个 key，不是硬编码判断 `tool_name == "write_file"`——以后任何新的写入类工具（比如规划中的 `apply_patch`）只要在 `metadata` 里填上同样几个字段，不用改 `llm_executor.py` 就能自动获得审计事件。
+`LLMRunExecutor`（`src/llm_executor.py`）判断是否要发这条事件，看的是 `ToolResult.metadata` 里有没有 `after_sha256` 这个 key，不是硬编码判断 `tool_name == "write_file"`——接入 `patch_file` 时完全没有改这部分逻辑，只是让 `patch_file` 的 `metadata` 也带上同样几个字段。中间踩过一个坑：`write_file` 把操作类型放在 `metadata["mode"]` 里，`patch_file` 放在 `metadata["operation"]` 里，两个字段名不一致，导致 `file_mutation` 事件一开始把 `patch_file` 的 `operation` 记成了 `null`（被 `tests/test_llm_executor_tools.py::test_patch_file_result_emits_file_mutation_event` 抓到）——现在读取时是 `metadata.get("operation", metadata.get("mode"))`，两种字段名都认。
 
 `LLMRunExecutor` 通过一个 `RunEventSink` 协议（`src/run_events.py`）解耦事件的产生和落盘：`NullRunEventSink`（默认，不注入时丢弃事件）、`InMemoryRunEventSink`（测试用）、`JsonlRunEventSink`（生产用，`LLMAgentRunExecutor` 注入，指向 `RunRepository.get_events_file()` 对应的路径，构造时 `truncate_existing=True` 清空同名旧文件，避免重跑同一个 `run_id` 时事件被追加污染）。`LLMRunResult.events` 仍然保留了同一份事件列表（内存副本），供不需要读文件的调用方直接使用。
 
@@ -329,6 +332,8 @@ cp .env.example .env
 
 最可靠的组合是 **2 + 3**：设计一个必须依赖上一步真实结果才能回答对的任务，再用临时日志确认轮次和工具名。单看 `output.md` 的文字内容只能算弱证据。
 
+`patch_file` 也用这套方法做过一次真实 API 验收（`tasks/task-patch-test` 的 run-001）：任务要求 `agent-coder` 把 `sandbox/hello.py` 里的 `print("Hello")` 改成 `print("Hello Agent")`，明确要求必须用 `patch_file`、不能用 `write_file`。真实调用序列是 `read_file` → `patch_file`（`old_text` 用了 `"def greet():\n    print(\"Hello\")"` 整块而不是只匹配 `"Hello"`，避免歧义匹配）→ `read_file` 自我验证 → 结束。`events.jsonl` 里全程没有出现 `write_file`，且产生了 `file_mutation`（`operation: "patch"`）事件，文件内容与预期完全一致。
+
 ## 一个独立的、更早期的原型：容器化 Agent Runtime
 
 `runtime/`（`Dockerfile` + `agent.sh`）和 `scripts/`（`run-agent.sh`/`stop-agent.sh`/`status-agent.sh`/`logs-agent.sh`/`remove-agent.sh`）是这个项目更早期的一版思路留下的：把每个 Agent 跑成一个独立的 Docker 容器，通过 shell 脚本管理容器生命周期。目前 `agent.sh` 里的"执行任务"部分只是 `sleep 5` 加写一个占位输出文件，**还没有和上面 `src/` 里的 Task/Run/Agent 主链路打通**。这部分可以理解为容器化隔离运行时的技术验证草稿，如果要用起来还需要单独规划。
@@ -336,7 +341,8 @@ cp .env.example .env
 ## 已知限制 / 待办
 
 - 纯文件系统持久化（JSON + Markdown），没有数据库，也没有并发写保护——多进程同时操作同一个 Task/Run 会有竞态风险。
-- `write_file` 只支持整篇创建/覆盖，没有 append 或按 diff 局部编辑的能力——改一个大文件的一小部分也得把全文重新传一遍。局部编辑（`apply_patch`/`edit_file`）还没做。
+- `write_file` 只支持整篇创建/覆盖，没有 append 能力；局部编辑现在由 `patch_file` 覆盖（唯一匹配的文本替换），但 `patch_file` 只能替换单个精确匹配的文本块，不支持传统的多段 unified diff 一次应用多处修改。
+- 目前还没有受限的命令/测试执行工具（比如跑 `pytest`/`ruff` 之类），Agent 改完代码后无法自己验证改动是否通过测试。
 - `JsonlRunEventSink` 每次 `emit()` 都单独 open/append/close 文件，实现简单、异常安全，但工具调用非常频繁时会有额外的文件系统开销——目前项目规模下可以接受，量级上去后可以换成常驻文件句柄。
 - 目前没有正式的"创建 Run"命令/流程——本 README 里所有 `run-NNN` 都是手动创建 `run.json`/`input.md` 再把 `task.json.current_run_id` 指过去的；因此也没有用到状态机里理论上存在的 `pending` 状态，Run 一创建出来就是 `in_progress`。
 - `resume` 用扫描全部 Task 的 `runs/` 目录来按 `run_id` 反查所属 Task，Run 数量大了以后是线性开销；状态机里 `interrupted → failed`（放弃重试）还没有对应的 CLI 命令，需要手动改 `run.json`。

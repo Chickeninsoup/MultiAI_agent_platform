@@ -19,6 +19,9 @@
     "write_file": {
       "enabled": true,
       "max_write_bytes": 100000
+    },
+    "patch_file": {
+      "enabled": true
     }
   }
 }

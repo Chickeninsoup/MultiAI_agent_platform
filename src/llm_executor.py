@@ -244,7 +244,8 @@ class LLMRunExecutor:
                             "round": llm_rounds,
                             "tool_call_id": result.tool_call_id,
                             "operation": result.metadata.get(
-                                "mode"
+                                "operation",
+                                result.metadata.get("mode"),
                             ),
                             "path": result.metadata.get("path"),
                             "before_sha256": result.metadata.get(

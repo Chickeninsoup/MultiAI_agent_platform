@@ -542,6 +542,126 @@ def test_read_only_tool_does_not_emit_file_mutation_event() -> None:
     assert "file_mutation" not in event_types
 
 
+class PatchFileFakeToolExecutor:
+    """A tool distinct from write_file, to prove the file_mutation
+    event is driven by ToolResult.metadata shape, not tool_name.
+    """
+
+    def get_definitions(
+        self,
+    ) -> list[ToolDefinition]:
+        return [
+            ToolDefinition(
+                name="patch_file",
+                description="Patch a file.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old_text": {"type": "string"},
+                        "new_text": {"type": "string"},
+                    },
+                    "required": ["path", "old_text", "new_text"],
+                },
+            )
+        ]
+
+    def execute(self, tool_call) -> ToolResult:
+        assert tool_call.name == "patch_file"
+
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            tool_name=tool_call.name,
+            success=True,
+            output="Patched test.py",
+            metadata={
+                "operation": "patch",
+                "path": "test.py",
+                "before_sha256": "aaaa",
+                "after_sha256": "bbbb",
+                "bytes_written": 3,
+            },
+        )
+
+
+class PatchFileProvider(FakeProvider):
+    def complete(
+        self,
+        request: LLMRequest,
+    ) -> LLMResponse:
+        self.requests.append(request)
+        self.call_count += 1
+
+        if self.call_count == 1:
+            return LLMResponse(
+                content=[
+                    LLMToolUseBlock(
+                        type="tool_use",
+                        id="toolu_1",
+                        name="patch_file",
+                        input={
+                            "path": "test.py",
+                            "old_text": "old",
+                            "new_text": "new",
+                        },
+                    )
+                ],
+                stop_reason="tool_use",
+                usage=LLMUsage(
+                    input_tokens=10,
+                    output_tokens=5,
+                ),
+            )
+
+        return LLMResponse(
+            content=[
+                LLMTextBlock(
+                    type="text",
+                    text="Patched the file.",
+                )
+            ],
+            stop_reason="end_turn",
+            usage=LLMUsage(
+                input_tokens=15,
+                output_tokens=6,
+            ),
+        )
+
+
+def test_patch_file_result_emits_file_mutation_event() -> None:
+    sink = InMemoryRunEventSink()
+
+    executor = LLMRunExecutor(
+        provider=PatchFileProvider(),
+        tool_executor=PatchFileFakeToolExecutor(),
+        max_tool_rounds=5,
+        max_total_tokens=1000,
+        event_sink=sink,
+    )
+
+    request = LLMRequest(
+        system_prompt="You are an agent.",
+        messages=[
+            LLMMessage(role="user", content="Patch test.py."),
+        ],
+        model="fake-model",
+        max_tokens=100,
+    )
+
+    executor.execute(request)
+
+    mutation_event = next(
+        event
+        for event in sink.events
+        if event["type"] == "file_mutation"
+    )
+    assert mutation_event["operation"] == "patch"
+    assert mutation_event["path"] == "test.py"
+    assert mutation_event["before_sha256"] == "aaaa"
+    assert mutation_event["after_sha256"] == "bbbb"
+    assert mutation_event["bytes_written"] == 3
+
+
 def test_full_tool_output_is_logged_in_debug_mode() -> None:
     sink = InMemoryRunEventSink()
 

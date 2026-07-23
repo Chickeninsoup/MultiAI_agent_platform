@@ -162,3 +162,154 @@ def test_create_tool_executor_enables_write_file_for_coder_agent(
 
     assert result.success is False
     assert result.error_code == "WRITE_SIZE_LIMIT_EXCEEDED"
+
+
+def test_create_tool_executor_disables_patch_file_by_default(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    agent_directory = tmp_path / "agent-general"
+    agent_directory.mkdir()
+
+    policy_path = agent_directory / "tool-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default": "deny",
+                "tools": {
+                    "patch_file": {
+                        "enabled": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    executor = create_tool_executor(
+        repository_root=repository_root,
+        agent_directory=agent_directory,
+    )
+
+    tool_names = {
+        definition.name
+        for definition in executor.get_definitions()
+    }
+
+    assert "patch_file" not in tool_names
+
+
+def test_create_tool_executor_enables_patch_file_for_coder_agent(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    agent_directory = tmp_path / "agent-coder"
+    agent_directory.mkdir()
+
+    policy_path = agent_directory / "tool-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default": "deny",
+                "tools": {
+                    "patch_file": {
+                        "enabled": True,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    executor = create_tool_executor(
+        repository_root=repository_root,
+        agent_directory=agent_directory,
+    )
+
+    tool_names = {
+        definition.name
+        for definition in executor.get_definitions()
+    }
+
+    assert "patch_file" in tool_names
+
+    from src.domain.tools.tool_call import ToolCall
+
+    target = repository_root / "test.py"
+    target.write_text("hello\n", encoding="utf-8")
+
+    result = executor.execute(
+        ToolCall(
+            id="tool-call-1",
+            name="patch_file",
+            input={
+                "path": "test.py",
+                "old_text": "hello",
+                "new_text": "hi",
+            },
+        )
+    )
+
+    assert result.success is True
+    assert result.metadata["operation"] == "patch"
+    assert target.read_text(encoding="utf-8") == "hi\n"
+
+
+def test_real_agent_coder_policy_exposes_patch_file(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    project_root = Path(__file__).resolve().parent.parent
+
+    executor = create_tool_executor(
+        repository_root=repository_root,
+        agent_directory=project_root / "agents" / "agent-coder",
+    )
+
+    tool_names = {
+        definition.name
+        for definition in executor.get_definitions()
+    }
+
+    assert tool_names == {
+        "list_files",
+        "read_file",
+        "git_status",
+        "git_diff",
+        "write_file",
+        "patch_file",
+    }
+
+
+def test_real_agent_general_policy_hides_mutation_tools(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    project_root = Path(__file__).resolve().parent.parent
+
+    executor = create_tool_executor(
+        repository_root=repository_root,
+        agent_directory=project_root / "agents" / "agent-general",
+    )
+
+    tool_names = {
+        definition.name
+        for definition in executor.get_definitions()
+    }
+
+    assert tool_names == {
+        "list_files",
+        "read_file",
+        "git_status",
+        "git_diff",
+    }
+    assert "write_file" not in tool_names
+    assert "patch_file" not in tool_names

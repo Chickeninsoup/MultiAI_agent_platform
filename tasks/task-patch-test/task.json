@@ -1,0 +1,28 @@
+{
+  "id": "task-patch-test",
+  "title": "Patch file test",
+  "description": "Validate that agent-coder can use patch_file (not write_file) to make a small, precise edit to an existing file.",
+  "workspace_id": "workspace-main",
+  "status": "in_progress",
+  "priority": "low",
+  "created_by": "user",
+  "assigned_agents": [
+    "agent-coder"
+  ],
+  "created_at": "2026-07-23T00:00:00Z",
+  "updated_at": "2026-07-23T10:06:57Z",
+  "started_at": "2026-07-23T00:00:00Z",
+  "completed_at": null,
+  "abandoned_at": null,
+  "current_run_id": "run-001",
+  "run_count": 1,
+  "completion_criteria": [
+    "Modify sandbox/hello.py using patch_file, not write_file.",
+    "Do not use write_file.",
+    "Report the change made."
+  ],
+  "tags": [
+    "patch-file",
+    "acceptance-test"
+  ]
+}
