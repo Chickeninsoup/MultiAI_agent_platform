@@ -447,3 +447,4 @@ class RunExecutionContext:
 class RunExecutionResult:
     output_markdown: str
     summary_markdown: str
+    metadata: dict[str, Any] = field(default_factory=dict)

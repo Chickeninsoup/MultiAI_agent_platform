@@ -79,18 +79,92 @@ tail -f tasks/<task-id>/runs/<run-id>/events.jsonl
 
 `LLMRunExecutor` 通过一个 `RunEventSink` 协议（`src/run_events.py`）解耦事件的产生和落盘：`NullRunEventSink`（默认，不注入时丢弃事件）、`InMemoryRunEventSink`（测试用）、`JsonlRunEventSink`（生产用，`LLMAgentRunExecutor` 注入，指向 `RunRepository.get_events_file()` 对应的路径，构造时 `truncate_existing=True` 清空同名旧文件，避免重跑同一个 `run_id` 时事件被追加污染）。`LLMRunResult.events` 仍然保留了同一份事件列表（内存副本），供不需要读文件的调用方直接使用。
 
+### CLI 输出摘要
+
+`RunService.execute()` 不再直接 `print`，而是返回一个结构化的 `RunServiceResult`（`task_id`/`run_id`/`agent_id`/`status`/`output_path`/`summary_path`/`events_path`，以及可选的 `llm_rounds`/`tool_rounds`/`tool_calls`/`total_input_tokens`/`total_output_tokens`——这些来自 `RunExecutionResult.metadata`，LLM 路径会填，simulated 路径没有则为 `None`）。`src/main.py` 基于这个结果打印：
+
+```text
+$ python -m src.main run task-20260713-001
+Completed run: run-022
+Output:  tasks/task-20260713-001/runs/run-022/output.md
+Summary: tasks/task-20260713-001/runs/run-022/summary.md
+Events:  tasks/task-20260713-001/runs/run-022/events.jsonl
+Usage: 27673 input / 1195 output tokens, 2 LLM round(s), 1 tool round(s), 2 tool call(s)
+```
+
+如果 Run 执行失败（`LLMAgentRunExecutor.execute()` 抛出任何异常），`RunService.execute()` 会把异常分类、把 Run 标记为 `interrupted`（可重试）或 `failed`（不建议重试）、再包装成 `RunExecutionFailedError`（带 `run_id`/`agent_id`/**分类后的真实状态**/`category`/`retryable`/`events_path`/原始异常）抛出，`main.py` 据此打印：
+
+```text
+$ LLM_MAX_TOOL_ROUNDS=1 python -m src.main run task-20260713-001
+Run failed: run-025
+Status: interrupted
+Category: LIMIT_EXCEEDED (retryable: True)
+Error: Maximum tool rounds exceeded.
+
+Events preserved:
+  tasks/task-20260713-001/runs/run-025/events.jsonl
+
+Retry with: python -m src.main resume run-025
+```
+
+`Status`/`Category`/`retryable` 都是真实持久化到 `run.json` 里的（`error_category`/`error_message`/`retryable` 三个字段），不是硬编码——`RunService` 从不会把失败的 Run 标记为 `completed`，具体标成 `interrupted` 还是 `failed` 取决于错误分类（见下面"Run 状态机与恢复"）。
+
+## Run 状态机与恢复
+
+一次 Run 的状态不再只有 `in_progress`/`completed` 两种：
+
+```text
+in_progress → completed                （正常结束）
+in_progress → interrupted              （可重试的失败：限流/Provider 抖动/进程崩溃）
+in_progress → failed                   （不建议重试的失败：配置错误/内部 bug）
+```
+
+### 错误分类（`src/run_errors.py`）
+
+`RunService` 抓到 `LLMAgentRunExecutor.execute()` 抛出的异常后，用 `classify_error()` 分成 6 类，每类有默认的可重试性：
+
+| 分类 | 可重试 | 触发场景 |
+|---|---|---|
+| `LIMIT_EXCEEDED` | 是 | `LLMRunLimitError`（`max_total_tokens`/`max_tool_rounds` 超限），调大配置或减少任务范围后可重试 |
+| `PROVIDER_ERROR` | 是 | `LLMRateLimitError`/`LLMConnectionError`/`LLMProviderError`，多是网络抖动或 Anthropic 侧暂时故障 |
+| `INTERRUPTED` | 是 | 进程被杀/崩溃导致 Run 卡在 `in_progress`——不是任务逻辑本身失败，由 `resume` 检测到后设置，不经过 `classify_error()` |
+| `TOOL_ERROR` | 是（默认） | 预留分类：目前 `ToolExecutor.execute()` 从不让异常向上传播（永远转成失败态 `ToolResult`），所以这条分类暂时没有实际触发路径 |
+| `CONFIGURATION_ERROR` | **否** | `LLMAuthenticationError`/`LLMConfigurationError`/`LLMPermissionError`——API Key、权限、账户配置问题，需要人先修好 |
+| `INTERNAL_ERROR` | **否** | 其它所有未识别异常（包括 `LLMRequestError`）——兜底分类，需要先排查代码/请求本身的问题 |
+
+`retryable=False` 的分类会把 Run 标记为 `failed`；`retryable=True` 的标记为 `interrupted`。
+
+### 恢复：`resume` 命令
+
+```bash
+python -m src.main resume <run-id>
+```
+
+流程（`RunService.resume()`）：
+
+1. 按 `run_id` 反查它属于哪个 Task（扫描所有 Task 下的 `runs/` 目录，因为 `run_id` 不含 Task 信息）。
+2. 只有状态是 `in_progress` 或 `interrupted` 的 Run 才允许恢复；`completed`/`failed` 会直接报错。
+3. 如果状态还是 `in_progress`——说明执行进程从没机会把终态写回磁盘（典型的"进程被杀"场景）——先把它标记为 `interrupted`。
+4. **不会复用同一个 `run_id` 重跑**：创建一个全新的 Run（`retry_of` 指向旧 Run，复用旧 Run 的 `input.md` 原文），`task.json` 的 `current_run_id`/`run_count` 指向新 Run。
+5. 立即对新 Run 发起一次真正的执行（等价于对新 Run 调 `RunService.execute()`），成功/失败的打印格式和 `run` 命令一致。
+
+每个 Run 只代表一次执行尝试，`retry_of` 链可以一路追溯到最初那次尝试，工具调用结果和 token 统计不会跨尝试混在一起。`run <task-id>` 现在也会拒绝对状态不是 `in_progress` 的 Run 直接重跑，报错里会提示改用 `resume`（相关已知限制见文末"已知限制 / 待办"）。
+
 ## 架构分层
 
 ```
 src/
-├── models.py              # 领域模型：TaskDefinition / RunDefinition / AgentDefinition（纯 dataclass，from_dict/to_dict 做校验）
-├── repositories.py        # 持久化层：读写 JSON/Markdown 文件（没有数据库，任务/运行数据就是 tasks/ 目录下的文件树）
+├── models.py              # 领域模型：TaskDefinition / RunDefinition / AgentDefinition / RunExecutionContext / RunExecutionResult（纯 dataclass，from_dict/to_dict 做校验）
+├── repositories.py        # 持久化层：读写 JSON/Markdown/JSONL 文件（没有数据库，任务/运行数据就是 tasks/ 目录下的文件树）
 ├── execution.py           # RunExecutor 协议（Protocol）：execute(context) -> RunExecutionResult
 ├── context_builder.py     # 把 Task+Run+Agent 拼成一份带项目快照的 RunExecutionContext
-├── run_service.py         # 编排一次 Run 的完整生命周期：加载→校验→执行→落盘→标记完成
+├── run_service.py         # 编排一次 Run 的完整生命周期：加载→校验→执行→落盘→标记完成/interrupted/failed；execute()/resume() 都返回 RunServiceResult，失败时抛 RunExecutionFailedError
+├── run_errors.py          # 错误分类：classify_error() 把异常映射到 6 类 RunErrorCategory，is_retryable() 给出默认可重试性
 ├── executor_factory.py    # 按 EXECUTION_MODE 组装对应的 RunExecutor（simulated / llm）
 ├── simulated_executor.py  # 确定性占位执行器
-├── llm_executor.py        # LLMRunExecutor（原始多轮工具循环）+ LLMAgentRunExecutor（接入 Task/Run 的适配层）
+├── llm_executor.py        # LLMRunExecutor：真正的多轮工具调用循环，返回 LLMRunResult
+├── llm_agent_run_executor.py  # LLMAgentRunExecutor：把 Task/Run/Agent 的 RunExecutionContext 接入 LLMRunExecutor 的适配层
+├── run_events.py          # RunEventSink 协议 + Null/InMemory/Jsonl 三种实现，events.jsonl 的实时写入机制
 ├── llm/                   # Provider 无关的请求/响应类型 + Anthropic 具体实现
 │   ├── base.py             # LLMProvider 协议：complete(request) -> response
 │   ├── types.py            # LLMRequest/LLMResponse/内容块（text/thinking/tool_use）
@@ -117,7 +191,7 @@ tasks/<task-id>/
 ├── task.json             # 状态、当前 Run、Run 计数、完成标准
 ├── background.md         # 跨 Run 共享的累积背景
 └── runs/run-NNN/
-    ├── run.json           # 状态、时间戳、（可选）自定义 context_files
+    ├── run.json           # 状态（in_progress/completed/interrupted/failed）、时间戳、（可选）retry_of/error_category/error_message/retryable/context_files
     ├── input.md            # 本轮的具体指令
     ├── output.md           # 模型的完整回答（含累计 token 用量等元信息）
     ├── summary.md          # 简短摘要（含累计 token/轮次/工具调用次数）
@@ -144,6 +218,9 @@ cp .env.example .env
 # 4. 执行某个任务当前的 Run
 .venv/bin/python -m src.main run <task-id>
 
+# 4b. 恢复一个卡在 in_progress/interrupted 的 Run（创建新 Run 重试）
+.venv/bin/python -m src.main resume <run-id>
+
 # 5. 跑测试
 .venv/bin/python -m pytest tests/
 ```
@@ -168,7 +245,7 @@ cp .env.example .env
 .venv/bin/python -m pytest tests/ -v
 ```
 
-当前 66 个测试，覆盖：工具的路径防护、四个具体工具的正确性、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）。
+当前 81 个测试，覆盖：工具的路径防护、四个具体工具的正确性、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）、错误分类（`tests/test_run_errors.py`：6 类 `RunErrorCategory` 与默认可重试性）、`RunService`（`tests/test_run_service.py`：成功路径的 `RunServiceResult`、simulated 风格的空 usage 字段、`LIMIT_EXCEEDED`→`interrupted` 与未分类错误→`failed` 两种失败路径、`resume()` 的崩溃检测/新建 Run/`retry_of` 链接/拒绝重跑非法状态）。
 
 > 注意：`pytest` 需要在装了 `anthropic`/`python-dotenv` 的同一个环境（`.venv`）里跑，否则涉及 Anthropic Provider 的测试会因为 `ModuleNotFoundError: No module named 'anthropic'` 而无法 collect。
 
@@ -244,5 +321,7 @@ cp .env.example .env
 - 纯文件系统持久化（JSON + Markdown），没有数据库，也没有并发写保护——多进程同时操作同一个 Task/Run 会有竞态风险。
 - 工具目前全部只读（`list_files`/`read_file`/`git_status`/`git_diff`），还没有写文件/编辑文件类的工具和对应的 handler。
 - `JsonlRunEventSink` 每次 `emit()` 都单独 open/append/close 文件，实现简单、异常安全，但工具调用非常频繁时会有额外的文件系统开销——目前项目规模下可以接受，量级上去后可以换成常驻文件句柄。
+- 目前没有正式的"创建 Run"命令/流程——本 README 里所有 `run-NNN` 都是手动创建 `run.json`/`input.md` 再把 `task.json.current_run_id` 指过去的；因此也没有用到状态机里理论上存在的 `pending` 状态，Run 一创建出来就是 `in_progress`。
+- `resume` 用扫描全部 Task 的 `runs/` 目录来按 `run_id` 反查所属 Task，Run 数量大了以后是线性开销；状态机里 `interrupted → failed`（放弃重试）还没有对应的 CLI 命令，需要手动改 `run.json`。
 - 容器化 Agent Runtime（`runtime/` + `scripts/`）与主执行链路是两套独立的东西，尚未整合。
 - 只支持 Anthropic 一家 provider；`LLMProvider` 协议本身是 provider 无关的，理论上可以扩展。

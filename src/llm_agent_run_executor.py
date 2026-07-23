@@ -92,6 +92,13 @@ class LLMAgentRunExecutor:
                 context=context,
                 run_result=run_result,
             ),
+            metadata={
+                "llm_rounds": run_result.llm_rounds,
+                "tool_rounds": run_result.tool_rounds,
+                "tool_calls": run_result.tool_calls,
+                "total_input_tokens": run_result.total_input_tokens,
+                "total_output_tokens": run_result.total_output_tokens,
+            },
         )
 
     def _resolve_repository_root(

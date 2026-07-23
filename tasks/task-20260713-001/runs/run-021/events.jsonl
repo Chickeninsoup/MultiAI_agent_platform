@@ -1,0 +1,6 @@
+{"type": "llm_response", "round": 1, "stop_reason": "tool_use", "input_tokens": 12552, "output_tokens": 226}
+{"type": "tool_call", "round": 1, "tool_call_id": "toolu_01MHsV2cJsXtLm6SpExqS3kK", "name": "list_files", "input": {"path": "src/services/tools/handlers/"}}
+{"type": "tool_result", "round": 1, "tool_call_id": "toolu_01MHsV2cJsXtLm6SpExqS3kK", "name": "list_files", "success": true, "error_code": null, "duration_ms": 1, "output_chars": 265, "truncated": false}
+{"type": "llm_response", "round": 2, "stop_reason": "tool_use", "input_tokens": 12898, "output_tokens": 503}
+{"type": "run_limit_exceeded", "limit": "max_tool_rounds", "configured_limit": 1, "actual_value": 2, "round": 2}
+{"type": "run_failed", "error_type": "LLMRunLimitError", "message": "Maximum tool rounds exceeded."}

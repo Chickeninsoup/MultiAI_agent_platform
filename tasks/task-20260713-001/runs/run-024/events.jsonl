@@ -1,0 +1,8 @@
+{"type": "llm_response", "round": 1, "stop_reason": "tool_use", "input_tokens": 15675, "output_tokens": 90}
+{"type": "tool_call", "round": 1, "tool_call_id": "toolu_016oXBxHVXXp8bFniKkgaFf7", "name": "list_files", "input": {"path": "src/services/tools/handlers/"}}
+{"type": "tool_result", "round": 1, "tool_call_id": "toolu_016oXBxHVXXp8bFniKkgaFf7", "name": "list_files", "success": true, "error_code": null, "duration_ms": 1, "output_chars": 265, "truncated": false}
+{"type": "llm_response", "round": 2, "stop_reason": "tool_use", "input_tokens": 15885, "output_tokens": 681}
+{"type": "tool_call", "round": 2, "tool_call_id": "toolu_01PTPPnvrZFGjiz7MxPTspZ6", "name": "read_file", "input": {"path": "src/services/tools/handlers/git_diff_tool.py", "start_line": 1, "end_line": 15}}
+{"type": "tool_result", "round": 2, "tool_call_id": "toolu_01PTPPnvrZFGjiz7MxPTspZ6", "name": "read_file", "success": true, "error_code": null, "duration_ms": 1, "output_chars": 446, "truncated": false}
+{"type": "llm_response", "round": 3, "stop_reason": "end_turn", "input_tokens": 16753, "output_tokens": 1556}
+{"type": "run_completed", "llm_rounds": 3, "tool_rounds": 2, "tool_calls": 2, "total_input_tokens": 48313, "total_output_tokens": 2327, "stop_reason": "end_turn"}

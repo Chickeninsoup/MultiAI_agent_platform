@@ -17,6 +17,7 @@ class SimulatedRunExecutor:
         return RunExecutionResult(
             output_markdown=output,
             summary_markdown=summary,
+            metadata={"execution_mode": "simulated"},
         )
 
     @staticmethod

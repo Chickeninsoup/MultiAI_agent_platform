@@ -1,0 +1,7 @@
+{"type": "llm_response", "round": 1, "stop_reason": "tool_use", "input_tokens": 13625, "output_tokens": 251}
+{"type": "tool_call", "round": 1, "tool_call_id": "toolu_01DA9GKANzb1uZw4D55ZWPEK", "name": "list_files", "input": {"path": "src/domain"}}
+{"type": "tool_result", "round": 1, "tool_call_id": "toolu_01DA9GKANzb1uZw4D55ZWPEK", "name": "list_files", "success": true, "error_code": null, "duration_ms": 0, "output_chars": 64, "truncated": false}
+{"type": "tool_call", "round": 1, "tool_call_id": "toolu_01RoZZoAKsonorap1YFqBqdU", "name": "read_file", "input": {"path": "src/domain/tools/tool_call.py", "start_line": 1, "end_line": 10}}
+{"type": "tool_result", "round": 1, "tool_call_id": "toolu_01RoZZoAKsonorap1YFqBqdU", "name": "read_file", "success": true, "error_code": null, "duration_ms": 0, "output_chars": 191, "truncated": false}
+{"type": "llm_response", "round": 2, "stop_reason": "end_turn", "input_tokens": 14048, "output_tokens": 944}
+{"type": "run_completed", "llm_rounds": 2, "tool_rounds": 1, "tool_calls": 2, "total_input_tokens": 27673, "total_output_tokens": 1195, "stop_reason": "end_turn"}

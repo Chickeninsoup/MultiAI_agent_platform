@@ -161,6 +161,29 @@ class RunRepository:
             self.get_input_file(task_id, run_id)
         )
 
+    def write_input(
+        self,
+        task_id: str,
+        run_id: str,
+        content: str,
+    ) -> None:
+        TextRepository.write(
+            self.get_input_file(task_id, run_id),
+            content,
+        )
+
+    def list_run_ids(self, task_id: str) -> list[str]:
+        runs_dir = self._tasks_dir / task_id / "runs"
+
+        if not runs_dir.exists():
+            return []
+
+        return sorted(
+            entry.name
+            for entry in runs_dir.iterdir()
+            if entry.is_dir()
+        )
+
     def write_output(
         self,
         task_id: str,

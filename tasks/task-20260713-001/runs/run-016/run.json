@@ -1,0 +1,14 @@
+{
+  "id": "run-016",
+  "task_id": "task-20260713-001",
+  "agent_id": "agent-general",
+  "status": "completed",
+  "created_at": "2026-07-22T09:20:00Z",
+  "updated_at": "2026-07-22T08:20:42Z",
+  "started_at": "2026-07-22T09:20:00Z",
+  "completed_at": "2026-07-22T08:20:42Z",
+  "workspace_id": "workspace-main",
+  "input_file": "input.md",
+  "output_file": "output.md",
+  "summary_file": "summary.md"
+}

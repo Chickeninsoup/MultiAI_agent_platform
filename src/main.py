@@ -9,7 +9,7 @@ from src.repositories import (
     RunRepository,
     TaskRepository,
 )
-from src.run_service import RunService
+from src.run_service import RunExecutionFailedError, RunService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -62,6 +62,32 @@ def list_tasks() -> None:
         )
 
 
+def _print_run_result(result) -> None:
+    print(f"Completed run: {result.run_id}")
+    print(f"Output:  {result.output_path}")
+    print(f"Summary: {result.summary_path}")
+
+    if result.events_path.exists():
+        print(f"Events:  {result.events_path}")
+
+    if result.llm_rounds is not None:
+        print(
+            f"Usage: {result.total_input_tokens} input / "
+            f"{result.total_output_tokens} output tokens, "
+            f"{result.llm_rounds} LLM round(s), "
+            f"{result.tool_rounds} tool round(s), "
+            f"{result.tool_calls} tool call(s)"
+        )
+
+
+def run_task(task_id: str) -> None:
+    _print_run_result(run_service.execute(task_id))
+
+
+def resume_run(run_id: str) -> None:
+    _print_run_result(run_service.resume(run_id))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -89,6 +115,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Task ID, for example task-20260713-001.",
     )
 
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help=(
+            "Retry a run that never reached a terminal state, as a "
+            "new run."
+        ),
+    )
+
+    resume_parser.add_argument(
+        "run_id",
+        help="Run ID to resume, for example run-023.",
+    )
+
     return parser
 
 
@@ -100,7 +139,25 @@ def main() -> None:
         if args.command == "list":
             list_tasks()
         elif args.command == "run":
-            run_service.execute(args.task_id)
+            run_task(args.task_id)
+        elif args.command == "resume":
+            resume_run(args.run_id)
+    except RunExecutionFailedError as error:
+        print(f"Run failed: {error.run_id}")
+        print(f"Status: {error.status}")
+        print(f"Category: {error.category} (retryable: {error.retryable})")
+        print(f"Error: {error.original_error}")
+
+        if error.events_path.exists():
+            print()
+            print("Events preserved:")
+            print(f"  {error.events_path}")
+
+        if error.retryable:
+            print()
+            print(f"Retry with: python -m src.main resume {error.run_id}")
+
+        parser.exit(status=1)
     except (FileNotFoundError, ValueError, KeyError, RuntimeError) as error:
         parser.exit(
             status=1,
