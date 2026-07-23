@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -217,6 +218,11 @@ def test_create_writes_new_file(tmp_path: Path) -> None:
         repository_root / "example.txt"
     ).read_text(encoding="utf-8") == "hello\n"
 
+    assert result.metadata["before_sha256"] is None
+    assert result.metadata["after_sha256"] == hashlib.sha256(
+        "hello\n".encode("utf-8")
+    ).hexdigest()
+
 
 def test_create_writes_empty_file(tmp_path: Path) -> None:
     repository_root = tmp_path / "repository"
@@ -289,6 +295,17 @@ def test_overwrite_replaces_existing_file(tmp_path: Path) -> None:
     assert (repository_root / "example.txt").read_text(
         encoding="utf-8"
     ) == "updated"
+
+    assert result.metadata["before_sha256"] == hashlib.sha256(
+        "original".encode("utf-8")
+    ).hexdigest()
+    assert result.metadata["after_sha256"] == hashlib.sha256(
+        "updated".encode("utf-8")
+    ).hexdigest()
+    assert (
+        result.metadata["before_sha256"]
+        != result.metadata["after_sha256"]
+    )
 
 
 def test_overwrite_rejects_missing_file(tmp_path: Path) -> None:

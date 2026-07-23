@@ -27,7 +27,7 @@
 
 ## 工具调用能力（当前重点）
 
-Agent 在 `llm` 模式下现在拥有 4 个只读工具：
+Agent 在 `llm` 模式下有 4 个只读工具，外加一个默认关闭、只对 `agent-coder` 开放的写文件工具：
 
 | 工具 | 作用 |
 |---|---|
@@ -35,11 +35,13 @@ Agent 在 `llm` 模式下现在拥有 4 个只读工具：
 | `read_file` | 读取仓库内某个文本文件，支持指定行号范围 |
 | `git_status` | 查看当前分支和工作区状态（`git status --short --branch`） |
 | `git_diff` | 查看未暂存或已暂存的改动（`git diff`） |
+| `write_file` | 在仓库内创建（`mode: create`）或整篇覆盖（`mode: overwrite`）一个 UTF-8 文本文件；只在 `agents/agent-coder/tool-policy.json` 里 `enabled: true`，`agent-general` 保持关闭 |
 
 **关键设计点**：
 
-- 所有工具都通过 `PathGuard`（`src/services/tools/path_guard.py`）做路径边界检查——请求路径必须解析到仓库根目录以内，拒绝 `../` 逃逸和软链接逃逸。
-- 每个 Agent 有自己独立的 `tool-policy.json`（`default: allow/deny` + 每个工具的 `enabled`/`max_output_chars`），决定它能用哪些工具、单次工具输出最多多少字符。
+- 所有工具都通过 `PathGuard`（`src/services/tools/path_guard.py`）做路径边界检查——请求路径必须解析到仓库根目录以内，拒绝 `../` 逃逸和软链接逃逸；`write_file` 额外用 `resolve_repository_write_path()` 处理目标文件尚不存在的情况（不自动创建父目录，父目录本身的软链接逃逸也会被拒绝）。
+- `write_file` 不会自动覆盖：`create` 遇到已存在的文件直接报错，`overwrite` 遇到不存在的文件也直接报错，两种模式语义互不兼容；写入内容有按字节数的上限（`max_write_bytes`），`.git`/`.env`/私钥/虚拟环境等敏感路径永远拒绝；实际落盘用 `mkstemp` + `fsync` + `os.replace` 做原子替换，避免进程中途崩溃留下半个文件。
+- 每个 Agent 有自己独立的 `tool-policy.json`（`default: allow/deny` + 每个工具的 `enabled`/`max_output_chars`/`max_write_bytes`），决定它能用哪些工具、单次工具输出最多多少字符、单次写入最多多少字节。
 - `ToolExecutor`（`src/services/tools/tool_executor.py`）是统一调度层：按名字找 handler、按策略校验是否启用、捕获异常统一转成失败态 `ToolResult`，不会让一次工具调用失败直接炸掉整个 Run。
 - `LLMRunExecutor`（`src/llm_executor.py`）实现真正的**多轮工具调用循环**：请求模型 → 如果模型要调用工具就执行 → 把工具结果作为下一轮消息喂回去 → 再次请求，直到模型给出最终文本回答。有 `max_tool_rounds`（默认 8 轮）和 `max_total_tokens`（默认 100000）两道保险，防止死循环或失控的开销。
 - `LLMAgentRunExecutor` 是适配层，把 Task/Run/Agent 那一套 `RunExecutionContext` 翻译成 `LLMRequest`，按当前 Run 的 Agent 现建对应的 `ToolExecutor`，再把最终结果翻译回 `RunExecutionResult`（Markdown 格式的 output/summary）。
@@ -76,6 +78,21 @@ tail -f tasks/<task-id>/runs/<run-id>/events.jsonl
 - **默认不记录工具的完整输出**（可能是完整文件内容或完整 git diff，体积大、可能包含源码/敏感信息、和 output.md 里的内容重复）。只有把 `.env` 里的 `DEBUG_LOG_FULL_OUTPUT` 设为 `true` 时，`tool_result` 事件才会额外带上完整的 `output` 字段；`tool_call` 的参数（`input`）本身体积通常很小，默认就会记。
 
 `error_code` 目前的取值集合（`src/services/tools/tool_executor.py`/`path_guard.py`/`git_command.py`/`read_file_tool.py`）：`UNKNOWN_TOOL`、`TOOL_DISABLED`、`INVALID_TOOL_INPUT`、`PATH_OUTSIDE_REPOSITORY`、`PATH_NOT_FOUND`、`GIT_COMMAND_FAILED`、`TOOL_EXECUTION_FAILED`（兜底）——看到失败的 Run，可以直接从 `error_code` 判断问题出在模型选择、policy 拒绝、输入格式、路径安全、Git 环境还是工具实现本身。
+
+### File mutation 审计
+
+写入类工具（目前是 `write_file`）成功执行后，`events.jsonl` 里除了通用的 `tool_result`，还会额外多记一条 `file_mutation`：
+
+```jsonl
+{"type": "file_mutation", "round": 1, "tool_call_id": "toolu_...", "operation": "create", "path": "src/example.py", "before_sha256": null, "after_sha256": "9f86d0...", "bytes_written": 13}
+```
+
+- `operation`：`create` 或 `overwrite`。
+- `before_sha256`：写入前文件内容的 sha256；`create` 场景下没有旧文件，恒为 `null`。
+- `after_sha256`：写入后文件内容的 sha256。
+- `bytes_written`：写入的 UTF-8 字节数（不是字符数）。
+
+`LLMRunExecutor`（`src/llm_executor.py`）判断是否要发这条事件，看的是 `ToolResult.metadata` 里有没有 `after_sha256` 这个 key，不是硬编码判断 `tool_name == "write_file"`——以后任何新的写入类工具（比如规划中的 `apply_patch`）只要在 `metadata` 里填上同样几个字段，不用改 `llm_executor.py` 就能自动获得审计事件。
 
 `LLMRunExecutor` 通过一个 `RunEventSink` 协议（`src/run_events.py`）解耦事件的产生和落盘：`NullRunEventSink`（默认，不注入时丢弃事件）、`InMemoryRunEventSink`（测试用）、`JsonlRunEventSink`（生产用，`LLMAgentRunExecutor` 注入，指向 `RunRepository.get_events_file()` 对应的路径，构造时 `truncate_existing=True` 清空同名旧文件，避免重跑同一个 `run_id` 时事件被追加污染）。`LLMRunResult.events` 仍然保留了同一份事件列表（内存副本），供不需要读文件的调用方直接使用。
 
@@ -319,7 +336,7 @@ cp .env.example .env
 ## 已知限制 / 待办
 
 - 纯文件系统持久化（JSON + Markdown），没有数据库，也没有并发写保护——多进程同时操作同一个 Task/Run 会有竞态风险。
-- 工具目前全部只读（`list_files`/`read_file`/`git_status`/`git_diff`），还没有写文件/编辑文件类的工具和对应的 handler。
+- `write_file` 只支持整篇创建/覆盖，没有 append 或按 diff 局部编辑的能力——改一个大文件的一小部分也得把全文重新传一遍。局部编辑（`apply_patch`/`edit_file`）还没做。
 - `JsonlRunEventSink` 每次 `emit()` 都单独 open/append/close 文件，实现简单、异常安全，但工具调用非常频繁时会有额外的文件系统开销——目前项目规模下可以接受，量级上去后可以换成常驻文件句柄。
 - 目前没有正式的"创建 Run"命令/流程——本 README 里所有 `run-NNN` 都是手动创建 `run.json`/`input.md` 再把 `task.json.current_run_id` 指过去的；因此也没有用到状态机里理论上存在的 `pending` 状态，Run 一创建出来就是 `in_progress`。
 - `resume` 用扫描全部 Task 的 `runs/` 目录来按 `run_id` 反查所属 Task，Run 数量大了以后是线性开销；状态机里 `interrupted → failed`（放弃重试）还没有对应的 CLI 命令，需要手动改 `run.json`。

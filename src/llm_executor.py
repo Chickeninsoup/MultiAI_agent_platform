@@ -237,6 +237,28 @@ class LLMRunExecutor:
 
                 self._emit_event(tool_result_event)
 
+                if "after_sha256" in result.metadata:
+                    self._emit_event(
+                        {
+                            "type": "file_mutation",
+                            "round": llm_rounds,
+                            "tool_call_id": result.tool_call_id,
+                            "operation": result.metadata.get(
+                                "mode"
+                            ),
+                            "path": result.metadata.get("path"),
+                            "before_sha256": result.metadata.get(
+                                "before_sha256"
+                            ),
+                            "after_sha256": result.metadata.get(
+                                "after_sha256"
+                            ),
+                            "bytes_written": result.metadata.get(
+                                "bytes_written"
+                            ),
+                        }
+                    )
+
             messages.append(
                 LLMMessage(
                     role="user",

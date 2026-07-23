@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from dataclasses import dataclass
@@ -159,6 +160,13 @@ class WriteFileTool:
                 f"Path is not a regular file: {parsed_input.path}"
             )
 
+        before_sha256 = (
+            hashlib.sha256(target_path.read_bytes()).hexdigest()
+            if target_exists
+            else None
+        )
+        after_sha256 = hashlib.sha256(encoded_content).hexdigest()
+
         self._atomic_write_text(
             target_path=target_path,
             content=parsed_input.content,
@@ -178,6 +186,8 @@ class WriteFileTool:
                 "created": not target_exists,
                 "overwritten": target_exists,
                 "bytes_written": len(encoded_content),
+                "before_sha256": before_sha256,
+                "after_sha256": after_sha256,
             },
         )
 

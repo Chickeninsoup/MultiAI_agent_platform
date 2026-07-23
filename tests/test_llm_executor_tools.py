@@ -389,6 +389,159 @@ def test_tool_output_is_not_logged_by_default() -> None:
     assert "output" not in tool_result_event
 
 
+class WriteFileFakeToolExecutor:
+    def get_definitions(
+        self,
+    ) -> list[ToolDefinition]:
+        return [
+            ToolDefinition(
+                name="write_file",
+                description="Write a file.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+            )
+        ]
+
+    def execute(self, tool_call) -> ToolResult:
+        assert tool_call.name == "write_file"
+
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            tool_name=tool_call.name,
+            success=True,
+            output="Created example.txt",
+            metadata={
+                "path": "example.txt",
+                "mode": "create",
+                "created": True,
+                "overwritten": False,
+                "bytes_written": 5,
+                "before_sha256": None,
+                "after_sha256": "deadbeef",
+            },
+        )
+
+
+class WriteFileProvider(FakeProvider):
+    def complete(
+        self,
+        request: LLMRequest,
+    ) -> LLMResponse:
+        self.requests.append(request)
+        self.call_count += 1
+
+        if self.call_count == 1:
+            return LLMResponse(
+                content=[
+                    LLMToolUseBlock(
+                        type="tool_use",
+                        id="toolu_1",
+                        name="write_file",
+                        input={
+                            "path": "example.txt",
+                            "content": "hello",
+                        },
+                    )
+                ],
+                stop_reason="tool_use",
+                usage=LLMUsage(
+                    input_tokens=10,
+                    output_tokens=5,
+                ),
+            )
+
+        return LLMResponse(
+            content=[
+                LLMTextBlock(
+                    type="text",
+                    text="Created the file.",
+                )
+            ],
+            stop_reason="end_turn",
+            usage=LLMUsage(
+                input_tokens=15,
+                output_tokens=6,
+            ),
+        )
+
+
+def test_write_file_result_emits_file_mutation_event() -> None:
+    sink = InMemoryRunEventSink()
+
+    executor = LLMRunExecutor(
+        provider=WriteFileProvider(),
+        tool_executor=WriteFileFakeToolExecutor(),
+        max_tool_rounds=5,
+        max_total_tokens=1000,
+        event_sink=sink,
+    )
+
+    request = LLMRequest(
+        system_prompt="You are an agent.",
+        messages=[
+            LLMMessage(role="user", content="Create example.txt."),
+        ],
+        model="fake-model",
+        max_tokens=100,
+    )
+
+    executor.execute(request)
+
+    event_types = [event["type"] for event in sink.events]
+    assert event_types == [
+        "llm_response",
+        "tool_call",
+        "tool_result",
+        "file_mutation",
+        "llm_response",
+        "run_completed",
+    ]
+
+    mutation_event = next(
+        event
+        for event in sink.events
+        if event["type"] == "file_mutation"
+    )
+    assert mutation_event["tool_call_id"] == "toolu_1"
+    assert mutation_event["operation"] == "create"
+    assert mutation_event["path"] == "example.txt"
+    assert mutation_event["before_sha256"] is None
+    assert mutation_event["after_sha256"] == "deadbeef"
+    assert mutation_event["bytes_written"] == 5
+
+
+def test_read_only_tool_does_not_emit_file_mutation_event() -> None:
+    sink = InMemoryRunEventSink()
+
+    executor = LLMRunExecutor(
+        provider=FakeProvider(),
+        tool_executor=FakeToolExecutor(),
+        max_tool_rounds=5,
+        max_total_tokens=1000,
+        event_sink=sink,
+    )
+
+    request = LLMRequest(
+        system_prompt="You are an agent.",
+        messages=[
+            LLMMessage(role="user", content="Inspect example.txt."),
+        ],
+        model="fake-model",
+        max_tokens=100,
+    )
+
+    executor.execute(request)
+
+    event_types = [event["type"] for event in sink.events]
+    assert "file_mutation" not in event_types
+
+
 def test_full_tool_output_is_logged_in_debug_mode() -> None:
     sink = InMemoryRunEventSink()
 
