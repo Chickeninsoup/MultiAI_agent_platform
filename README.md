@@ -75,7 +75,7 @@ tail -f tasks/<task-id>/runs/<run-id>/events.jsonl
 
 - `llm_response`：每次调用 Provider 后记一条，`round` 是第几次调用模型（不是"第几次工具调用"）。
 - `tool_call`：模型**请求**了什么——`round`、`tool_call_id`、`name`、参数（`input`）。只记请求，不含执行结果。
-- `tool_result`：平台**实际执行**的结果——成功/失败、`error_code`、`output_chars`、`truncated`、`duration_ms`（`ToolExecutor.execute()` 统一计时，成功/失败路径都有）。`tool_call`/`tool_result` 是两条独立事件，不合并成一条。
+- `tool_result`：平台**实际执行**的结果——成功/失败、`error_code`、`output_chars`、`truncated`、`duration_ms`（`ToolExecutor.execute()` 统一计时，成功/失败路径都有）、`exit_code`/`timed_out`（只有 `run_test` 会填，其它工具恒为 `null`——这两个字段是 5C-4 加的：`run_test` 的 `ToolResult.success` 恒为 `true`（测试失败不算工具失败），所以不把 `exit_code` 也带进事件的话，事件日志根本没法区分"测试通过"和"测试失败"）。`tool_call`/`tool_result` 是两条独立事件，不合并成一条。
 - `run_limit_exceeded`：触发 `max_total_tokens`/`max_tool_rounds` 限制时记一条（`limit`/`configured_limit`/`actual_value`/`round`），紧接着会抛出 `LLMRunLimitError`。
 - `run_completed`：Run 正常结束（`end_turn`，无更多工具调用）时记一条，带累计的 `llm_rounds`/`tool_rounds`/`tool_calls`/`total_input_tokens`/`total_output_tokens`。
 - `run_failed`：`LLMRunExecutor.execute()` 内部只要抛出任何异常（包括 `run_limit_exceeded` 之后的 `LLMRunLimitError`），外层都会补记一条 `run_failed`（`error_type`/`message`），然后原样把异常继续往上抛——所以触发限制的 Run 会同时看到 `run_limit_exceeded` 和 `run_failed` 两条。
@@ -136,10 +136,15 @@ Retry with: python -m src.main resume run-025
 一次 Run 的状态不再只有 `in_progress`/`completed` 两种：
 
 ```text
-in_progress → completed                （正常结束）
+in_progress → completed                （正常结束，且不需要人工审核）
+in_progress → awaiting_review          （正常结束，但改动了文件，等待人工审核）
+awaiting_review → approved             （人工在 review 命令里批准）
+awaiting_review → rejected             （人工在 review 命令里拒绝）
 in_progress → interrupted              （可重试的失败：限流/Provider 抖动/进程崩溃）
 in_progress → failed                   （不建议重试的失败：配置错误/内部 bug）
 ```
+
+`status` 字段本身现在没有对应的 `Literal`/枚举类型——`RunDefinition.status` 一直是纯 `str`（从 5B-6 引入 `interrupted`/`failed` 开始就是这样），合法值靠代码里几个集合/字符串比较来约束（例如 `RESUMABLE_STATUSES = {"in_progress", "interrupted"}`），不是靠类型系统。`awaiting_review`/`approved`/`rejected` 延续的是同一种风格，没有为此新增类型层。
 
 ### 错误分类（`src/run_errors.py`）
 
@@ -172,6 +177,66 @@ python -m src.main resume <run-id>
 
 每个 Run 只代表一次执行尝试，`retry_of` 链可以一路追溯到最初那次尝试，工具调用结果和 token 统计不会跨尝试混在一起。`run <task-id>` 现在也会拒绝对状态不是 `in_progress` 的 Run 直接重跑，报错里会提示改用 `resume`（相关已知限制见文末"已知限制 / 待办"）。
 
+`awaiting_review`/`approved`/`rejected` 都**不在** `RESUMABLE_STATUSES` 里——`awaiting_review` 不是崩溃，而是执行成功但在等人决定，`resume` 对它们一律报错（和 `completed`/`failed` 一样，只是错误提示文案目前还是通用的"cannot be resumed"，还没针对"这个 Run 该用 review 而不是 resume"专门改文案，算是已知的小体验缺口）。
+
+### 人工审核：`ChangeSnapshot` 与 `review` 命令
+
+`RunService.execute()` 在 Run 正常执行完之后（写完 `output.md`/`summary.md`，还没决定最终 `status` 之前），会额外做两件事：
+
+1. 用 `ChangeSnapshotBuilder`（`src/review/change_snapshot_builder.py`）从这次 Run 的 `events.jsonl` 里提取一个 `ChangeSnapshot`（`src/review/change_snapshot.py`）：`changed_files`（`file_mutation` 事件的 `path`，去重、保留首次出现顺序）、`mutation_count`（`file_mutation` 事件的**原始**条数，不去重——同一个文件改 3 次和改 3 个文件各一次，这两种情况值得区分）、`test_results`（`tool_result` 事件里 `name == "run_test"` 的那条，取 `exit_code`/`timed_out`，多次调用取最后一次）、`diff_path`（如果 Run 目录下已经有 `diff.patch` 就记路径，否则 `null`——**这一步不生成 diff 内容**，diff 生成本身还没做）。
+2. 把这个 snapshot 存成 Run 目录下的 `change_snapshot.json`（`src/review/snapshot_repository.py` 的 `SnapshotRepository`）。**这一步是关键**：`review` 命令看到的是 Run 结束那一刻的快照，不是重新扫一遍当前仓库状态——如果之后人手动改了代码，`review` 显示的内容不会跟着变。
+
+然后用 `requires_review()`（`src/review/review_policy.py`）决定这次 Run 是 `completed` 还是 `awaiting_review`：
+
+```python
+def requires_review(*, agent_id: str, snapshot: ChangeSnapshot) -> bool:
+    if agent_id != "agent-coder":
+        return False
+    return snapshot.mutation_count > 0
+```
+
+也就是只有 `agent-coder` 产生了至少一次文件改动的 Run 才需要审核；`agent-general`（本来也没有写权限）和没有实际改动的 Run（比如只是读代码、跑了下测试）都直接 `completed`。`run.json` 的 `metadata` 里始终会记 `review_required`/`changed_files`（不管要不要审核都记，不是只在需要审核时才写），方便以后不用重新解析 `events.jsonl` 就知道"这个 Run 当初为什么停在这里"。
+
+审核命令：
+
+```bash
+python -m src.main review <run-id>
+```
+
+```text
+Run: run-030
+
+Status:
+awaiting_review
+
+Changed files:
+- src/main.py
+- tests/test_main.py
+
+Mutations:
+3
+
+Tests:
+run_test:
+  exit_code: 0
+  timed_out: False
+
+Diff:
+(no diff recorded)
+
+AI Summary:
+Not generated yet.
+
+Approve? [y/N]:
+```
+
+- 如果这个 Run 从没产生过 `change_snapshot.json`（比如是 5C-4 上线之前跑的历史 Run），会打印"No change snapshot recorded for this run."然后直接返回，不会报错崩溃。
+- 只有当前状态是 `awaiting_review` 时才会出现 `Approve? [y/N]:` 提示；已经 `approved`/`rejected` 或本来就 `completed` 的 Run，看完报告就结束，不会再问一遍。
+- 输入 `y`/`yes` → `RunService.decide_review(run_id, approved=True)` → 状态变 `approved`；输入 `n`/`no`/`reject` → 状态变 `rejected`；其它任何输入（包括直接回车）→ 不做任何状态变更，Run 继续留在 `awaiting_review`，可以以后再审。
+- `ReviewReport`（`src/review/review_report.py`：`run_id`/`summary`/`changed_files`/`risks`/`approved`）目前 `summary`/`risks` 恒为 `None`/`[]`——`ReviewService.build_report()`（`src/review/review_service.py`）故意设计成纯函数、不做任何 I/O，这样以后接一个真正的 Reviewer Agent 去填 `summary`/`risks` 时，不需要碰这一层的接口。
+
+`src/review/NOTES.md` 记了一个已知的未来演化点：`ChangeSnapshot.test_results` 现在是"按工具名存一条结果"，多次调用同一个测试工具会互相覆盖；如果以后一次 Run 需要跑多个不同测试命令并且都要保留结果，这个字段的形状需要从 dict 换成 list。现在不改，只是先记下来。
+
 ## 架构分层
 
 ```
@@ -193,6 +258,14 @@ src/
 │   ├── anthropic_provider.py
 │   └── exceptions.py       # 细分的 LLM*Error 异常层级
 ├── domain/tools/           # 工具调用的领域类型：ToolDefinition / ToolCall / ToolResult
+├── review/                # 人工审核层（5C-4）
+│   ├── change_snapshot.py         # ChangeSnapshot：一次 Run 的变更事实（changed_files/mutation_count/test_results/diff_path）
+│   ├── change_snapshot_builder.py # 从 events.jsonl 构建 ChangeSnapshot
+│   ├── snapshot_repository.py     # 把 ChangeSnapshot 存/取到 Run 目录下的 change_snapshot.json
+│   ├── review_policy.py           # requires_review()：决定一个 Run 是 completed 还是 awaiting_review
+│   ├── review_report.py           # ReviewReport：summary/risks 目前是占位，留给未来的 Reviewer Agent
+│   ├── review_service.py          # ChangeSnapshot -> ReviewReport 的纯转换，无 I/O
+│   └── NOTES.md                   # 记录暂不实现、但未来可能要做的设计演化点
 └── services/tools/         # 工具调用的服务层
     ├── tool_executor.py     # 统一调度
     ├── tool_policy.py       # 策略加载与校验（Agent 能不能用某个工具）
@@ -219,11 +292,12 @@ tasks/<task-id>/
 ├── task.json             # 状态、当前 Run、Run 计数、完成标准
 ├── background.md         # 跨 Run 共享的累积背景
 └── runs/run-NNN/
-    ├── run.json           # 状态（in_progress/completed/interrupted/failed）、时间戳、（可选）retry_of/error_category/error_message/retryable/context_files
-    ├── input.md            # 本轮的具体指令
-    ├── output.md           # 模型的完整回答（含累计 token 用量等元信息）
-    ├── summary.md          # 简短摘要（含累计 token/轮次/工具调用次数）
-    └── events.jsonl        # 每轮 LLM 调用/工具调用的结构化审计记录，实时追加写入（llm 模式才有）
+    ├── run.json               # 状态（in_progress/completed/awaiting_review/approved/rejected/interrupted/failed）、时间戳、（可选）retry_of/error_category/error_message/retryable/context_files/review_required/changed_files
+    ├── input.md                # 本轮的具体指令
+    ├── output.md                # 模型的完整回答（含累计 token 用量等元信息）
+    ├── summary.md                # 简短摘要（含累计 token/轮次/工具调用次数）
+    ├── events.jsonl              # 每轮 LLM 调用/工具调用的结构化审计记录，实时追加写入（llm 模式才有）
+    └── change_snapshot.json      # ChangeSnapshot 的持久化（changed_files/mutation_count/test_results/diff_path），review 命令读这个而不是重新计算
 ```
 
 ## 快速开始
@@ -248,6 +322,9 @@ cp .env.example .env
 
 # 4b. 恢复一个卡在 in_progress/interrupted 的 Run（创建新 Run 重试）
 .venv/bin/python -m src.main resume <run-id>
+
+# 4c. 查看一个 awaiting_review 的 Run（改动了什么/测试结果），并 approve/reject
+.venv/bin/python -m src.main review <run-id>
 
 # 5. 跑测试
 .venv/bin/python -m pytest tests/
@@ -274,7 +351,7 @@ cp .env.example .env
 .venv/bin/python -m pytest tests/ -v
 ```
 
-当前 244 个测试，覆盖：工具的路径防护（含 `write_file`/`patch_file` 专用的 `resolve_repository_write_path()`）、七个具体工具的正确性（`list_files`/`read_file`/`git_status`/`git_diff`/`write_file`/`patch_file`/`run_test`）、共享写入内核 `file_writer.py`、`run_test` 的命令白名单加载校验（`test_policy.py`）与受限 subprocess 执行层（`test_runner.py`：`shell=False`、超时、输出截断、cwd 隔离）、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy`/`TestPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关、`file_mutation` 审计事件的生成/排除条件）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）、`executor_factory.py` 的 Agent 能力隔离（`tests/test_executor_factory.py`：合成 policy + 加载真实 `agents/agent-general`/`agents/agent-coder` 两份 `tool-policy.json` 双重验证）、错误分类（`tests/test_run_errors.py`：6 类 `RunErrorCategory` 与默认可重试性）、`RunService`（`tests/test_run_service.py`：成功路径的 `RunServiceResult`、simulated 风格的空 usage 字段、`LIMIT_EXCEEDED`→`interrupted` 与未分类错误→`failed` 两种失败路径、`resume()` 的崩溃检测/新建 Run/`retry_of` 链接/拒绝重跑非法状态）。
+当前 279 个测试，覆盖：工具的路径防护（含 `write_file`/`patch_file` 专用的 `resolve_repository_write_path()`）、七个具体工具的正确性（`list_files`/`read_file`/`git_status`/`git_diff`/`write_file`/`patch_file`/`run_test`）、共享写入内核 `file_writer.py`、`run_test` 的命令白名单加载校验（`test_policy.py`）与受限 subprocess 执行层（`test_runner.py`：`shell=False`、超时、输出截断、cwd 隔离）、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy`/`TestPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关、`file_mutation` 审计事件的生成/排除条件）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）、`executor_factory.py` 的 Agent 能力隔离（`tests/test_executor_factory.py`：合成 policy + 加载真实 `agents/agent-general`/`agents/agent-coder` 两份 `tool-policy.json` 双重验证）、错误分类（`tests/test_run_errors.py`：6 类 `RunErrorCategory` 与默认可重试性）、`RunService`（`tests/test_run_service.py`：成功路径的 `RunServiceResult`、simulated 风格的空 usage 字段、`LIMIT_EXCEEDED`→`interrupted` 与未分类错误→`failed` 两种失败路径、`resume()` 的崩溃检测/新建 Run/`retry_of` 链接/拒绝重跑非法状态、`awaiting_review`/`approved`/`rejected` 状态转换、`get_run()`/`decide_review()`）、`src/review/` 人工审核层（`tests/review/`：`ChangeSnapshot`/`ChangeSnapshotBuilder`/`SnapshotRepository`/`review_policy.requires_review()`/`ReviewService`/`ReviewReport`，共 26 个测试）。
 
 > 注意：`pytest` 需要在装了 `anthropic`/`python-dotenv` 的同一个环境（`.venv`）里跑，否则涉及 Anthropic Provider 的测试会因为 `ModuleNotFoundError: No module named 'anthropic'` 而无法 collect。
 
@@ -356,6 +433,7 @@ cp .env.example .env
 - `run_test` 只能跑 `src/config/test_policy.json` 里预先注册好的命令（目前是整个 `pytest -q` 套件和 `compileall`），不能只跑某一个测试文件/测试函数——Agent 想验证一处小改动，也得等全量测试跑完（当前项目规模下约 3~4 秒，可接受，但会随测试量增长变慢）。
 - `JsonlRunEventSink` 每次 `emit()` 都单独 open/append/close 文件，实现简单、异常安全，但工具调用非常频繁时会有额外的文件系统开销——目前项目规模下可以接受，量级上去后可以换成常驻文件句柄。
 - 目前没有正式的"创建 Run"命令/流程——本 README 里所有 `run-NNN` 都是手动创建 `run.json`/`input.md` 再把 `task.json.current_run_id` 指过去的；因此也没有用到状态机里理论上存在的 `pending` 状态，Run 一创建出来就是 `in_progress`。
-- `resume` 用扫描全部 Task 的 `runs/` 目录来按 `run_id` 反查所属 Task，Run 数量大了以后是线性开销；状态机里 `interrupted → failed`（放弃重试）还没有对应的 CLI 命令，需要手动改 `run.json`。
+- `resume`/`review`/`get_run()` 都是用扫描全部 Task 的 `runs/` 目录来按 `run_id` 反查所属 Task，Run 数量大了以后是线性开销；`run_id` 本身只在单个 Task 内保证唯一，跨 Task 撞号时会静默解析到（按 Task 目录字母序）第一个匹配的——手工测试 `review` 时实际踩到过这个问题（见 `tasks/task-5c4d-review-cli-verification/background.md`），不是 5C-4 新引入的，`resume` 早就有同样的行为。状态机里 `interrupted → failed`（放弃转重试为放弃）还没有对应的 CLI 命令，需要手动改 `run.json`。
+- `review` 命令目前没有 Reviewer Agent：`ReviewReport.summary`/`risks` 恒为 `None`/`[]`，diff 内容也从不生成（`ChangeSnapshot.diff_path` 目前恒为 `null`，因为没有代码会写 `diff.patch`）——审核时只能看 `changed_files`/`mutation_count`/`test_results`，看不到具体改了什么行。approve/reject 也只是把 `run.json.status` 改成 `approved`/`rejected`，不会自动 `git commit`。
 - 容器化 Agent Runtime（`runtime/` + `scripts/`）与主执行链路是两套独立的东西，尚未整合。
 - 只支持 Anthropic 一家 provider；`LLMProvider` 协议本身是 provider 无关的，理论上可以扩展。

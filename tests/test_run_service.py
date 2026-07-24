@@ -41,11 +41,15 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
-def _setup_fixture(tasks_dir: Path, agents_dir: Path) -> None:
+def _setup_fixture(
+    tasks_dir: Path,
+    agents_dir: Path,
+    agent_id: str = "agent-test",
+) -> None:
     _write_json(
-        agents_dir / "agent-test" / "agent.json",
+        agents_dir / agent_id / "agent.json",
         {
-            "id": "agent-test",
+            "id": agent_id,
             "name": "Test Agent",
             "description": "An agent used for testing.",
             "owner": "owner-1",
@@ -79,7 +83,7 @@ def _setup_fixture(tasks_dir: Path, agents_dir: Path) -> None:
             "status": "in_progress",
             "priority": "normal",
             "created_by": "user-1",
-            "assigned_agents": ["agent-test"],
+            "assigned_agents": [agent_id],
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
             "started_at": "2026-01-01T00:00:00Z",
@@ -97,7 +101,7 @@ def _setup_fixture(tasks_dir: Path, agents_dir: Path) -> None:
         {
             "id": "run-1",
             "task_id": "task-1",
-            "agent_id": "agent-test",
+            "agent_id": agent_id,
             "status": "in_progress",
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
@@ -110,10 +114,11 @@ def _setup_fixture(tasks_dir: Path, agents_dir: Path) -> None:
 def _build_service(
     tmp_path: Path,
     outcome,
+    agent_id: str = "agent-test",
 ):
     tasks_dir = tmp_path / "tasks"
     agents_dir = tmp_path / "agents"
-    _setup_fixture(tasks_dir, agents_dir)
+    _setup_fixture(tasks_dir, agents_dir, agent_id=agent_id)
 
     task_repository = TaskRepository(tasks_dir)
     run_repository = RunRepository(tasks_dir)
@@ -126,6 +131,7 @@ def _build_service(
         agent_repository=agent_repository,
         context_builder=FakeContextBuilder(),
         executor=executor,
+        project_root=tmp_path,
     )
 
     return service, task_repository, run_repository, executor
@@ -317,6 +323,233 @@ def test_resume_rejects_completed_run(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="cannot be resumed"):
         service.resume("run-1")
+
+
+def test_resume_rejects_awaiting_review_run(tmp_path: Path) -> None:
+    # awaiting_review means execution already succeeded and is
+    # pending human sign-off - it is not a crash/failure state, so it
+    # must stay outside RESUMABLE_STATUSES. This test exists so that
+    # if someone later adds "awaiting_review" to RESUMABLE_STATUSES
+    # (e.g. while building the approve/reject workflow), it fails
+    # loudly instead of silently letting `resume` re-execute a Run
+    # that's waiting on a human.
+    service, _, run_repository, _ = _build_service(
+        tmp_path,
+        RunExecutionResult(output_markdown="# out", summary_markdown="# sum"),
+        agent_id="agent-coder",
+    )
+
+    events_path = run_repository.get_events_file("task-1", "run-1")
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        json.dumps(
+            {
+                "type": "file_mutation",
+                "operation": "patch",
+                "path": "src/main.py",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = service.execute("task-1")
+    assert result.status == "awaiting_review"
+
+    with pytest.raises(ValueError, match="cannot be resumed"):
+        service.resume("run-1")
+
+
+def test_agent_coder_run_with_mutations_awaits_review(
+    tmp_path: Path,
+) -> None:
+    service, _, run_repository, _ = _build_service(
+        tmp_path,
+        RunExecutionResult(output_markdown="# out", summary_markdown="# sum"),
+        agent_id="agent-coder",
+    )
+
+    events_path = run_repository.get_events_file("task-1", "run-1")
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        json.dumps(
+            {
+                "type": "file_mutation",
+                "operation": "patch",
+                "path": "src/main.py",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = service.execute("task-1")
+
+    assert result.status == "awaiting_review"
+
+    saved_run = run_repository.load("task-1", "run-1")
+    assert saved_run.status == "awaiting_review"
+    assert saved_run.metadata["review_required"] is True
+    assert saved_run.metadata["changed_files"] == ["src/main.py"]
+
+    # the ChangeSnapshot itself is persisted alongside the run, so a
+    # later `review` can load it without recomputing against
+    # whatever the repository looks like by then
+    snapshot_path = (
+        run_repository.get_run_dir("task-1", "run-1")
+        / "change_snapshot.json"
+    )
+    assert snapshot_path.exists()
+
+
+def test_get_run_returns_task_and_run(tmp_path: Path) -> None:
+    service, _, _, _ = _build_service(
+        tmp_path,
+        RunExecutionResult(output_markdown="", summary_markdown=""),
+    )
+
+    task, run = service.get_run("run-1")
+
+    assert task.id == "task-1"
+    assert run.id == "run-1"
+
+
+def test_get_run_raises_for_unknown_run_id(tmp_path: Path) -> None:
+    service, _, _, _ = _build_service(
+        tmp_path,
+        RunExecutionResult(output_markdown="", summary_markdown=""),
+    )
+
+    with pytest.raises(ValueError, match="No task owns run"):
+        service.get_run("run-does-not-exist")
+
+
+def test_decide_review_approves_awaiting_review_run(
+    tmp_path: Path,
+) -> None:
+    service, _, run_repository, _ = _build_service(
+        tmp_path,
+        RunExecutionResult(output_markdown="# out", summary_markdown="# sum"),
+        agent_id="agent-coder",
+    )
+
+    events_path = run_repository.get_events_file("task-1", "run-1")
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        json.dumps(
+            {
+                "type": "file_mutation",
+                "path": "src/main.py",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    service.execute("task-1")
+
+    decided_run = service.decide_review("run-1", approved=True)
+
+    assert decided_run.status == "approved"
+
+    saved_run = run_repository.load("task-1", "run-1")
+    assert saved_run.status == "approved"
+
+
+def test_decide_review_rejects_awaiting_review_run(
+    tmp_path: Path,
+) -> None:
+    service, _, run_repository, _ = _build_service(
+        tmp_path,
+        RunExecutionResult(output_markdown="# out", summary_markdown="# sum"),
+        agent_id="agent-coder",
+    )
+
+    events_path = run_repository.get_events_file("task-1", "run-1")
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        json.dumps(
+            {
+                "type": "file_mutation",
+                "path": "src/main.py",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    service.execute("task-1")
+
+    decided_run = service.decide_review("run-1", approved=False)
+
+    assert decided_run.status == "rejected"
+
+    saved_run = run_repository.load("task-1", "run-1")
+    assert saved_run.status == "rejected"
+
+
+def test_decide_review_rejects_run_not_awaiting_review(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _ = _build_service(
+        tmp_path,
+        RunExecutionResult(output_markdown="", summary_markdown=""),
+    )
+
+    service.execute("task-1")  # marks run-1 completed, not awaiting_review
+
+    with pytest.raises(ValueError, match="not awaiting review"):
+        service.decide_review("run-1", approved=True)
+
+
+def test_agent_coder_run_without_mutations_completes(
+    tmp_path: Path,
+) -> None:
+    service, _, run_repository, _ = _build_service(
+        tmp_path,
+        RunExecutionResult(output_markdown="# out", summary_markdown="# sum"),
+        agent_id="agent-coder",
+    )
+
+    result = service.execute("task-1")
+
+    assert result.status == "completed"
+
+    saved_run = run_repository.load("task-1", "run-1")
+    assert saved_run.status == "completed"
+    assert saved_run.metadata["review_required"] is False
+    assert saved_run.metadata["changed_files"] == []
+
+
+def test_non_coder_agent_run_with_mutation_events_still_completes(
+    tmp_path: Path,
+) -> None:
+    # agent-test can't actually call write_file/patch_file (tool-policy
+    # denies them), but the review gate itself must key off agent_id,
+    # not just presence of file_mutation events, in case that ever
+    # changes.
+    service, _, run_repository, _ = _build_service(
+        tmp_path,
+        RunExecutionResult(output_markdown="# out", summary_markdown="# sum"),
+    )
+
+    events_path = run_repository.get_events_file("task-1", "run-1")
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        json.dumps(
+            {
+                "type": "file_mutation",
+                "operation": "patch",
+                "path": "src/main.py",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = service.execute("task-1")
+
+    assert result.status == "completed"
 
 
 def test_resume_unknown_run_id_raises(tmp_path: Path) -> None:

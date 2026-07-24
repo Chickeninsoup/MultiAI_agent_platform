@@ -9,6 +9,11 @@ from src.repositories import (
     RunRepository,
     TaskRepository,
 )
+from src.review.review_service import ReviewService
+from src.review.snapshot_repository import (
+    SnapshotNotFoundError,
+    SnapshotRepository,
+)
 from src.run_service import RunExecutionFailedError, RunService
 
 
@@ -43,7 +48,11 @@ run_service = RunService(
     agent_repository=agent_repository,
     context_builder=context_builder,
     executor=executor,
+    project_root=PROJECT_ROOT,
 )
+
+snapshot_repository = SnapshotRepository()
+review_service = ReviewService()
 
 
 def list_tasks() -> None:
@@ -63,7 +72,11 @@ def list_tasks() -> None:
 
 
 def _print_run_result(result) -> None:
-    print(f"Completed run: {result.run_id}")
+    if result.status == "completed":
+        print(f"Completed run: {result.run_id}")
+    else:
+        print(f"Run {result.run_id}: {result.status}")
+
     print(f"Output:  {result.output_path}")
     print(f"Summary: {result.summary_path}")
 
@@ -86,6 +99,77 @@ def run_task(task_id: str) -> None:
 
 def resume_run(run_id: str) -> None:
     _print_run_result(run_service.resume(run_id))
+
+
+def review_run(run_id: str) -> None:
+    task, run = run_service.get_run(run_id)
+
+    print(f"Run: {run_id}")
+    print()
+    print("Status:")
+    print(run.status)
+    print()
+
+    run_directory = run_repository.get_run_dir(task.id, run.id)
+
+    try:
+        snapshot = snapshot_repository.load(run_directory)
+    except SnapshotNotFoundError:
+        print("No change snapshot recorded for this run.")
+        return
+
+    approved = {"approved": True, "rejected": False}.get(run.status)
+    report = review_service.build_report(
+        snapshot=snapshot,
+        approved=approved,
+    )
+
+    print("Changed files:")
+    if report.changed_files:
+        for path in report.changed_files:
+            print(f"- {path}")
+    else:
+        print("(none)")
+    print()
+
+    print("Mutations:")
+    print(snapshot.mutation_count)
+    print()
+
+    print("Tests:")
+    if snapshot.test_results:
+        for test_name, test_result in snapshot.test_results.items():
+            print(f"{test_name}:")
+            for key, value in test_result.items():
+                print(f"  {key}: {value}")
+    else:
+        print("(none)")
+    print()
+
+    print("Diff:")
+    if snapshot.diff_path:
+        print(Path(snapshot.diff_path).read_text(encoding="utf-8"))
+    else:
+        print("(no diff recorded)")
+    print()
+
+    print("AI Summary:")
+    print(report.summary or "Not generated yet.")
+
+    if run.status != "awaiting_review":
+        return
+
+    print()
+    answer = input("Approve? [y/N]: ").strip().lower()
+
+    if answer in {"y", "yes"}:
+        run_service.decide_review(run_id, approved=True)
+        print("Approved.")
+    elif answer in {"n", "no", "reject"}:
+        run_service.decide_review(run_id, approved=False)
+        print("Rejected.")
+    else:
+        print("No decision made. Run remains awaiting_review.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -128,6 +212,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run ID to resume, for example run-023.",
     )
 
+    review_parser = subparsers.add_parser(
+        "review",
+        help=(
+            "View a run's recorded changes/test results and, if it "
+            "is awaiting_review, approve or reject it."
+        ),
+    )
+
+    review_parser.add_argument(
+        "run_id",
+        help="Run ID to review, for example run-030.",
+    )
+
     return parser
 
 
@@ -142,6 +239,8 @@ def main() -> None:
             run_task(args.task_id)
         elif args.command == "resume":
             resume_run(args.run_id)
+        elif args.command == "review":
+            review_run(args.run_id)
     except RunExecutionFailedError as error:
         print(f"Run failed: {error.run_id}")
         print(f"Status: {error.status}")

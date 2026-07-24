@@ -230,6 +230,12 @@ class LLMRunExecutor:
                     "truncated": result.metadata.get(
                         "truncated", False
                     ),
+                    "exit_code": result.metadata.get(
+                        "exit_code"
+                    ),
+                    "timed_out": result.metadata.get(
+                        "timed_out"
+                    ),
                 }
 
                 if self._debug_log_full_output:

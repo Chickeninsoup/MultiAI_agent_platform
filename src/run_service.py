@@ -10,6 +10,9 @@ from src.repositories import (
     RunRepository,
     TaskRepository,
 )
+from src.review.change_snapshot_builder import ChangeSnapshotBuilder
+from src.review.review_policy import requires_review
+from src.review.snapshot_repository import SnapshotRepository
 from src.run_errors import RunErrorCategory, classify_error, is_retryable
 
 RESUMABLE_STATUSES = {"in_progress", "interrupted"}
@@ -82,12 +85,16 @@ class RunService:
         agent_repository: AgentRepository,
         context_builder: RunContextBuilder,
         executor: RunExecutor,
+        project_root: Path,
     ) -> None:
         self._task_repository = task_repository
         self._run_repository = run_repository
         self._agent_repository = agent_repository
         self._context_builder = context_builder
         self._executor = executor
+        self._project_root = project_root
+        self._change_snapshot_builder = ChangeSnapshotBuilder()
+        self._snapshot_repository = SnapshotRepository()
 
     def execute(self, task_id: str) -> RunServiceResult:
         task = self._task_repository.load(task_id)
@@ -158,13 +165,41 @@ class RunService:
             result.summary_markdown,
         )
 
+        run_directory = self._run_repository.get_run_dir(
+            task.id,
+            run.id,
+        )
+        snapshot = self._change_snapshot_builder.build(
+            run_id=run.id,
+            run_directory=run_directory,
+            repository_root=self._project_root,
+        )
+        # Persisted so `review` later shows the state as it was right
+        # after this Run finished, not a live recomputation against
+        # whatever the repository looks like at review time.
+        self._snapshot_repository.save(run_directory, snapshot)
+
+        review_required = requires_review(
+            agent_id=agent.id,
+            snapshot=snapshot,
+        )
+
         completed_at = utc_now()
 
-        completed_run = replace(
+        finished_run = replace(
             run,
-            status="completed",
+            status=(
+                "awaiting_review"
+                if review_required
+                else "completed"
+            ),
             updated_at=completed_at,
             completed_at=completed_at,
+            metadata={
+                **run.metadata,
+                "review_required": review_required,
+                "changed_files": snapshot.changed_files,
+            },
         )
 
         updated_task = replace(
@@ -172,14 +207,14 @@ class RunService:
             updated_at=completed_at,
         )
 
-        self._run_repository.save(completed_run)
+        self._run_repository.save(finished_run)
         self._task_repository.save(updated_task)
 
         return RunServiceResult(
             task_id=task.id,
             run_id=run.id,
             agent_id=run.agent_id,
-            status=completed_run.status,
+            status=finished_run.status,
             output_path=self._run_repository.get_output_file(
                 task.id,
                 run.id,
@@ -268,6 +303,42 @@ class RunService:
         self._task_repository.save(updated_task)
 
         return self.execute(task.id)
+
+    def get_run(
+        self,
+        run_id: str,
+    ) -> tuple[TaskDefinition, RunDefinition]:
+        task = self._find_task_for_run(run_id)
+
+        if task is None:
+            raise ValueError(f"No task owns run {run_id}")
+
+        run = self._run_repository.load(task.id, run_id)
+
+        return task, run
+
+    def decide_review(
+        self,
+        run_id: str,
+        *,
+        approved: bool,
+    ) -> RunDefinition:
+        _task, run = self.get_run(run_id)
+
+        if run.status != "awaiting_review":
+            raise ValueError(
+                f"Run {run_id} has status '{run.status}' and is "
+                "not awaiting review."
+            )
+
+        decided_run = replace(
+            run,
+            status="approved" if approved else "rejected",
+            updated_at=utc_now(),
+        )
+        self._run_repository.save(decided_run)
+
+        return decided_run
 
     def _fail_run(
         self,
