@@ -154,6 +154,15 @@ def _build_settings(
         llm_max_tool_rounds=8,
         llm_max_total_tokens=100_000,
         debug_log_full_output=debug_log_full_output,
+        test_policy_path="test_policy.json",
+    )
+
+
+def _write_test_policy(repository_root: Path) -> None:
+    policy_path = repository_root / "test_policy.json"
+    policy_path.write_text(
+        json.dumps({"tests": {}}),
+        encoding="utf-8",
     )
 
 
@@ -200,6 +209,7 @@ def test_executes_run_through_multi_round_tool_loop(
         "hello world\n",
         encoding="utf-8",
     )
+    _write_test_policy(repository_root)
 
     agent_directory = tmp_path / "agents" / "agent-test"
     agent_directory.mkdir(parents=True)
@@ -299,6 +309,7 @@ def test_uses_agent_default_model_when_not_placeholder(
         "hello world\n",
         encoding="utf-8",
     )
+    _write_test_policy(repository_root)
 
     agent_directory = tmp_path / "agents" / "agent-test"
     agent_directory.mkdir(parents=True)
@@ -332,6 +343,7 @@ def test_debug_mode_includes_full_tool_output_in_events(
         "hello world\n",
         encoding="utf-8",
     )
+    _write_test_policy(repository_root)
 
     agent_directory = tmp_path / "agents" / "agent-test"
     agent_directory.mkdir(parents=True)

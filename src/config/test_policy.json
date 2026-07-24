@@ -1,0 +1,24 @@
+{
+  "tests": {
+    "unit": {
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "-q"
+      ],
+      "timeout_seconds": 120,
+      "max_output_chars": 10000
+    },
+    "compile": {
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "compileall",
+        "src"
+      ],
+      "timeout_seconds": 60,
+      "max_output_chars": 10000
+    }
+  }
+}

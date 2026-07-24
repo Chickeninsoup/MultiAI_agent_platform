@@ -49,6 +49,10 @@ class LLMAgentRunExecutor:
         tool_executor = create_tool_executor(
             repository_root=repository_root,
             agent_directory=agent_directory,
+            test_policy_path=(
+                self._project_root
+                / self._settings.test_policy_path
+            ),
         )
 
         events_path = self._run_repository.get_events_file(

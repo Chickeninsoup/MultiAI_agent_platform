@@ -21,6 +21,9 @@
     },
     "patch_file": {
       "enabled": false
+    },
+    "run_test": {
+      "enabled": false
     }
   }
 }

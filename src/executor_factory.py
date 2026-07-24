@@ -11,7 +11,10 @@ from src.services.tools.handlers.git_status_tool import GitStatusTool
 from src.services.tools.handlers.list_files_tool import ListFilesTool
 from src.services.tools.handlers.patch_file_tool import PatchFileTool
 from src.services.tools.handlers.read_file_tool import ReadFileTool
+from src.services.tools.handlers.run_test_tool import RunTestTool
 from src.services.tools.handlers.write_file_tool import WriteFileTool
+from src.services.tools.test_policy import TestPolicy
+from src.services.tools.test_runner import TestRunner
 from src.services.tools.tool_executor import ToolExecutor
 from src.services.tools.tool_policy import load_tool_policy
 
@@ -90,11 +93,13 @@ def create_tool_executor(
     *,
     repository_root: Path,
     agent_directory: Path,
+    test_policy_path: Path,
     default_max_output_chars: int = 100_000,
     default_max_write_bytes: int = 100_000,
 ) -> ToolExecutor:
     policy_path = agent_directory / "tool-policy.json"
     tool_policy = load_tool_policy(policy_path)
+    test_policy = TestPolicy.load(test_policy_path)
 
     return ToolExecutor(
         repository_root=repository_root,
@@ -110,6 +115,10 @@ def create_tool_executor(
                 ),
             ),
             PatchFileTool(),
+            RunTestTool(
+                test_policy=test_policy,
+                test_runner=TestRunner(),
+            ),
         ],
         tool_policy=tool_policy,
         max_output_chars=default_max_output_chars,

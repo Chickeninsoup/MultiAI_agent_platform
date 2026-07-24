@@ -137,6 +137,7 @@ class Settings:
     llm_max_tool_rounds: int
     llm_max_total_tokens: int
     debug_log_full_output: bool
+    test_policy_path: str
 
     @classmethod
     def load(
@@ -228,6 +229,10 @@ class Settings:
                 "DEBUG_LOG_FULL_OUTPUT",
                 False,
             ),
+            test_policy_path=os.getenv(
+                "TEST_POLICY_PATH",
+                "src/config/test_policy.json",
+            ).strip(),
         )
 
     @property

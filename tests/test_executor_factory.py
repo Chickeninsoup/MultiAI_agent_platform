@@ -22,6 +22,11 @@ from pathlib import Path
 
 from src.executor_factory import create_tool_executor
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_REAL_TEST_POLICY_PATH = (
+    _PROJECT_ROOT / "src" / "config" / "test_policy.json"
+)
+
 
 def test_create_tool_executor_loads_agent_policy(
     tmp_path: Path,
@@ -59,6 +64,7 @@ def test_create_tool_executor_loads_agent_policy(
     executor = create_tool_executor(
         repository_root=repository_root,
         agent_directory=agent_directory,
+        test_policy_path=_REAL_TEST_POLICY_PATH,
     )
 
     definitions = executor.get_definitions()
@@ -100,6 +106,7 @@ def test_create_tool_executor_disables_write_file_by_default(
     executor = create_tool_executor(
         repository_root=repository_root,
         agent_directory=agent_directory,
+        test_policy_path=_REAL_TEST_POLICY_PATH,
     )
 
     tool_names = {
@@ -138,6 +145,7 @@ def test_create_tool_executor_enables_write_file_for_coder_agent(
     executor = create_tool_executor(
         repository_root=repository_root,
         agent_directory=agent_directory,
+        test_policy_path=_REAL_TEST_POLICY_PATH,
     )
 
     tool_names = {
@@ -191,6 +199,7 @@ def test_create_tool_executor_disables_patch_file_by_default(
     executor = create_tool_executor(
         repository_root=repository_root,
         agent_directory=agent_directory,
+        test_policy_path=_REAL_TEST_POLICY_PATH,
     )
 
     tool_names = {
@@ -228,6 +237,7 @@ def test_create_tool_executor_enables_patch_file_for_coder_agent(
     executor = create_tool_executor(
         repository_root=repository_root,
         agent_directory=agent_directory,
+        test_policy_path=_REAL_TEST_POLICY_PATH,
     )
 
     tool_names = {
@@ -259,7 +269,7 @@ def test_create_tool_executor_enables_patch_file_for_coder_agent(
     assert target.read_text(encoding="utf-8") == "hi\n"
 
 
-def test_real_agent_coder_policy_exposes_patch_file(
+def test_real_agent_coder_policy_exposes_mutation_tools(
     tmp_path: Path,
 ) -> None:
     repository_root = tmp_path / "repository"
@@ -270,6 +280,7 @@ def test_real_agent_coder_policy_exposes_patch_file(
     executor = create_tool_executor(
         repository_root=repository_root,
         agent_directory=project_root / "agents" / "agent-coder",
+        test_policy_path=_REAL_TEST_POLICY_PATH,
     )
 
     tool_names = {
@@ -284,6 +295,7 @@ def test_real_agent_coder_policy_exposes_patch_file(
         "git_diff",
         "write_file",
         "patch_file",
+        "run_test",
     }
 
 
@@ -298,6 +310,7 @@ def test_real_agent_general_policy_hides_mutation_tools(
     executor = create_tool_executor(
         repository_root=repository_root,
         agent_directory=project_root / "agents" / "agent-general",
+        test_policy_path=_REAL_TEST_POLICY_PATH,
     )
 
     tool_names = {
@@ -313,3 +326,97 @@ def test_real_agent_general_policy_hides_mutation_tools(
     }
     assert "write_file" not in tool_names
     assert "patch_file" not in tool_names
+    assert "run_test" not in tool_names
+
+
+def test_create_tool_executor_disables_run_test_by_default(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    agent_directory = tmp_path / "agent-general"
+    agent_directory.mkdir()
+
+    policy_path = agent_directory / "tool-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default": "deny",
+                "tools": {
+                    "run_test": {
+                        "enabled": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    executor = create_tool_executor(
+        repository_root=repository_root,
+        agent_directory=agent_directory,
+        test_policy_path=_REAL_TEST_POLICY_PATH,
+    )
+
+    tool_names = {
+        definition.name
+        for definition in executor.get_definitions()
+    }
+
+    assert "run_test" not in tool_names
+
+
+def test_create_tool_executor_enables_run_test_for_coder_agent(
+    tmp_path: Path,
+) -> None:
+    # The registered "compile" command is `.venv/bin/python -m
+    # compileall src`, relative to repository_root — so this has to
+    # run against the real project root (which has a .venv), not a
+    # throwaway tmp_path directory.
+    repository_root = _PROJECT_ROOT
+
+    agent_directory = tmp_path / "agent-coder"
+    agent_directory.mkdir()
+
+    policy_path = agent_directory / "tool-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default": "deny",
+                "tools": {
+                    "run_test": {
+                        "enabled": True,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    executor = create_tool_executor(
+        repository_root=repository_root,
+        agent_directory=agent_directory,
+        test_policy_path=_REAL_TEST_POLICY_PATH,
+    )
+
+    tool_names = {
+        definition.name
+        for definition in executor.get_definitions()
+    }
+
+    assert "run_test" in tool_names
+
+    from src.domain.tools.tool_call import ToolCall
+
+    result = executor.execute(
+        ToolCall(
+            id="tool-call-1",
+            name="run_test",
+            input={"test_name": "compile"},
+        )
+    )
+
+    assert result.success is True
+    assert result.metadata["exit_code"] == 0
+    assert result.metadata["timed_out"] is False

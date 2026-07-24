@@ -1,0 +1,10 @@
+{
+  "id": "run-001",
+  "task_id": "task-run-test-loop",
+  "agent_id": "agent-coder",
+  "status": "completed",
+  "created_at": "2026-07-24T00:00:00Z",
+  "updated_at": "2026-07-24T03:09:01Z",
+  "started_at": "2026-07-24T00:00:00Z",
+  "completed_at": "2026-07-24T03:09:01Z"
+}

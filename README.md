@@ -1,6 +1,6 @@
 # Claude Agent Platform
 
-一个用于管理「任务（Task）→ 运行（Run）→ 智能体（Agent）」工作流的私有 Python 平台。Agent 通过 Anthropic Claude API 执行任务，并且现在**可以真实调用工具**（读文件、列目录、查 git 状态/diff）来完成任务，而不只是根据静态快照臆测答案。
+一个用于管理「任务（Task）→ 运行（Run）→ 智能体（Agent）」工作流的私有 Python 平台。Agent 通过 Anthropic Claude API 执行任务，并且现在**可以真实调用工具**（读文件、列目录、查 git 状态/diff，特定 Agent 还能创建/修改文件、跑受限的测试命令）来完成任务，而不只是根据静态快照臆测答案。
 
 > 早期原型阶段，个人项目，正在快速迭代。这份 README 反映的是代码库**当前**的真实状态，不是规划中的功能。
 
@@ -27,7 +27,7 @@
 
 ## 工具调用能力（当前重点）
 
-Agent 在 `llm` 模式下有 4 个只读工具，外加两个默认关闭、只对 `agent-coder` 开放的写入类工具：
+Agent 在 `llm` 模式下有 4 个只读工具，外加三个默认关闭、只对 `agent-coder` 开放的能力更强的工具：
 
 | 工具 | 作用 |
 |---|---|
@@ -37,12 +37,14 @@ Agent 在 `llm` 模式下有 4 个只读工具，外加两个默认关闭、只�
 | `git_diff` | 查看未暂存或已暂存的改动（`git diff`） |
 | `write_file` | 在仓库内创建（`mode: create`）或整篇覆盖（`mode: overwrite`）一个 UTF-8 文本文件；只在 `agents/agent-coder/tool-policy.json` 里 `enabled: true`，`agent-general` 保持关闭 |
 | `patch_file` | 把文件里某一段**精确且唯一**的 `old_text` 替换成 `new_text`（`new_text` 可以是空字符串，表示删除）；`old_text` 在文件里不存在或出现不止一次都会直接失败，不会猜测意图。同样只在 `agent-coder` 开放。 |
+| `run_test` | 运行一个**预先在平台侧注册好**的测试命令（目前是 `unit`/`compile`），返回 exit code + stdout/stderr；Agent 只能传 `test_name`，传不了任意 shell 命令。同样只在 `agent-coder` 开放。 |
 
 **关键设计点**：
 
 - 所有工具都通过 `PathGuard`（`src/services/tools/path_guard.py`）做路径边界检查——请求路径必须解析到仓库根目录以内，拒绝 `../` 逃逸和软链接逃逸；`write_file`/`patch_file` 都额外用 `resolve_repository_write_path()` 处理目标文件尚不存在的情况（不自动创建父目录，父目录本身的软链接逃逸也会被拒绝）。
 - `write_file` 不会自动覆盖：`create` 遇到已存在的文件直接报错，`overwrite` 遇到不存在的文件也直接报错，两种模式语义互不兼容；写入内容有按字节数的上限（`max_write_bytes`），`.git`/`.env`/私钥/虚拟环境等敏感路径永远拒绝；实际落盘用 `mkstemp` + `fsync` + `os.replace` 做原子替换，避免进程中途崩溃留下半个文件。
 - `patch_file`（`src/services/tools/handlers/patch_file_tool.py`）设计成不做 preview-then-apply 两阶段（会有 TOCTOU 风险：预览之后、真正写入之前文件可能已被改动），而是一次 `apply_patch()` 调用里完成"读取→用 `content.count(old_text)` 校验唯一匹配→拼接新内容→写入"的全过程。`write_file` 和 `patch_file` 共享同一份写入内核（`src/services/tools/file_writer.py` 的 `calculate_sha256()`/`atomic_write_text()`），避免两个工具的原子写入逻辑各自实现、逐渐漂移。
+- `run_test`（`src/services/tools/handlers/run_test_tool.py`）刻意**不是**一个通用 shell 工具——它只接受 `test_name`，不接受 `command`。实际能跑什么由平台侧的 `TestPolicy`（`src/services/tools/test_policy.py`，配置文件 `src/config/test_policy.json`，路径可通过 `.env` 的 `TEST_POLICY_PATH` 覆盖，与 `tool-policy.json` 分开维护——前者回答"这个 Agent 能不能用 `run_test`"，后者回答"`run_test` 能跑哪些命令"，权限和可执行内容两件事不揉在一起）把 `test_name` 映射到一个固定的 argv 列表（例如 `unit` → `[".venv/bin/python", "-m", "pytest", "-q"]`）。`TestRunner`（`src/services/tools/test_runner.py`）用 `subprocess.run(..., shell=False, cwd=repository_root, timeout=...)` 执行，`shell=False` 意味着 `test_name` 不可能被拼进一个 shell 字符串去注入任意命令；超时会被捕获为 `timed_out=True` 而不是让整个 Run 卡死；stdout/stderr 分别按 `max_output_chars` 截断。**测试失败不是工具失败**：`run_test` 只要成功执行了命令，无论 exit code 是 0 还是非 0，`ToolResult.success` 都是 `true`——失败信息通过 `metadata["exit_code"]`/`metadata["timed_out"]` 和 stdout/stderr 传给模型，让它自己判断要不要继续修。
 - 每个 Agent 有自己独立的 `tool-policy.json`（`default: allow/deny` + 每个工具的 `enabled`/`max_output_chars`/`max_write_bytes`），决定它能用哪些工具、单次工具输出最多多少字符、单次写入最多多少字节。
 - `ToolExecutor`（`src/services/tools/tool_executor.py`）是统一调度层：按名字找 handler、按策略校验是否启用、捕获异常统一转成失败态 `ToolResult`，不会让一次工具调用失败直接炸掉整个 Run。
 - `LLMRunExecutor`（`src/llm_executor.py`）实现真正的**多轮工具调用循环**：请求模型 → 如果模型要调用工具就执行 → 把工具结果作为下一轮消息喂回去 → 再次请求，直到模型给出最终文本回答。有 `max_tool_rounds`（默认 8 轮）和 `max_total_tokens`（默认 100000）两道保险，防止死循环或失控的开销。
@@ -95,7 +97,7 @@ tail -f tasks/<task-id>/runs/<run-id>/events.jsonl
 - `after_sha256`：写入后文件内容的 sha256。
 - `bytes_written`：写入的 UTF-8 字节数（不是字符数）。
 
-`LLMRunExecutor`（`src/llm_executor.py`）判断是否要发这条事件，看的是 `ToolResult.metadata` 里有没有 `after_sha256` 这个 key，不是硬编码判断 `tool_name == "write_file"`——接入 `patch_file` 时完全没有改这部分逻辑，只是让 `patch_file` 的 `metadata` 也带上同样几个字段。中间踩过一个坑：`write_file` 把操作类型放在 `metadata["mode"]` 里，`patch_file` 放在 `metadata["operation"]` 里，两个字段名不一致，导致 `file_mutation` 事件一开始把 `patch_file` 的 `operation` 记成了 `null`（被 `tests/test_llm_executor_tools.py::test_patch_file_result_emits_file_mutation_event` 抓到）——现在读取时是 `metadata.get("operation", metadata.get("mode"))`，两种字段名都认。
+`LLMRunExecutor`（`src/llm_executor.py`）判断是否要发这条事件，看的是 `ToolResult.metadata` 里有没有 `after_sha256` 这个 key，不是硬编码判断 `tool_name == "write_file"`——接入 `patch_file` 时完全没有改这部分逻辑，只是让 `patch_file` 的 `metadata` 也带上同样几个字段。中间踩过一个坑：`write_file` 把操作类型放在 `metadata["mode"]` 里，`patch_file` 放在 `metadata["operation"]` 里，两个字段名不一致，导致 `file_mutation` 事件一开始把 `patch_file` 的 `operation` 记成了 `null`（被 `tests/test_llm_executor_tools.py::test_patch_file_result_emits_file_mutation_event` 抓到）——现在读取时是 `metadata.get("operation", metadata.get("mode"))`，两种字段名都认。`run_test` 不产出 `file_mutation`：它的 `metadata` 里没有 `after_sha256`（本来就不改文件），所以同一条判断逻辑自然把它排除在外，不需要额外的"排除列表"。
 
 `LLMRunExecutor` 通过一个 `RunEventSink` 协议（`src/run_events.py`）解耦事件的产生和落盘：`NullRunEventSink`（默认，不注入时丢弃事件）、`InMemoryRunEventSink`（测试用）、`JsonlRunEventSink`（生产用，`LLMAgentRunExecutor` 注入，指向 `RunRepository.get_events_file()` 对应的路径，构造时 `truncate_existing=True` 清空同名旧文件，避免重跑同一个 `run_id` 时事件被追加污染）。`LLMRunResult.events` 仍然保留了同一份事件列表（内存副本），供不需要读文件的调用方直接使用。
 
@@ -193,10 +195,13 @@ src/
 ├── domain/tools/           # 工具调用的领域类型：ToolDefinition / ToolCall / ToolResult
 └── services/tools/         # 工具调用的服务层
     ├── tool_executor.py     # 统一调度
-    ├── tool_policy.py       # 策略加载与校验
+    ├── tool_policy.py       # 策略加载与校验（Agent 能不能用某个工具）
+    ├── test_policy.py       # run_test 的命令白名单加载与校验（run_test 能跑哪些命令）
+    ├── test_runner.py       # TestRunner：受限 subprocess 执行层（shell=False/cwd/timeout/输出截断）
     ├── path_guard.py        # 仓库路径边界防护
+    ├── file_writer.py       # write_file/patch_file 共享的写入内核（sha256 + 原子替换）
     ├── git_command.py       # git 子进程调用的公共封装
-    └── handlers/             # 四个具体工具的实现
+    └── handlers/             # 七个具体工具的实现
 ```
 
 配置和 Agent 定义：
@@ -206,6 +211,9 @@ agents/<agent-id>/
 ├── agent.json           # 名称、角色、默认模型、资源限制、能力标签
 ├── system-prompt.md     # 该 Agent 专属的 system prompt
 └── tool-policy.json      # 该 Agent 的工具权限策略
+
+src/config/
+└── test_policy.json      # run_test 的命令白名单（不区分 Agent，是平台全局配置）
 
 tasks/<task-id>/
 ├── task.json             # 状态、当前 Run、Run 计数、完成标准
@@ -258,6 +266,7 @@ cp .env.example .env
 | `LLM_MAX_TOOL_ROUNDS` | `8` | 单次 Run 最多允许几轮工具调用 |
 | `LLM_MAX_TOTAL_TOKENS` | `100000` | 单次 Run（含所有工具调用轮次）的总 token 上限 |
 | `DEBUG_LOG_FULL_OUTPUT` | `false` | `true` 时 `events.jsonl` 里的 `tool_result` 事件会额外带上工具的完整输出（默认只记 `output_chars`/`truncated`，不记全文） |
+| `TEST_POLICY_PATH` | `src/config/test_policy.json` | 相对 `project_root` 的路径，指向 `run_test` 的命令白名单文件 |
 
 ## 测试
 
@@ -265,7 +274,7 @@ cp .env.example .env
 .venv/bin/python -m pytest tests/ -v
 ```
 
-当前 81 个测试，覆盖：工具的路径防护、四个具体工具的正确性、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）、错误分类（`tests/test_run_errors.py`：6 类 `RunErrorCategory` 与默认可重试性）、`RunService`（`tests/test_run_service.py`：成功路径的 `RunServiceResult`、simulated 风格的空 usage 字段、`LIMIT_EXCEEDED`→`interrupted` 与未分类错误→`failed` 两种失败路径、`resume()` 的崩溃检测/新建 Run/`retry_of` 链接/拒绝重跑非法状态）。
+当前 244 个测试，覆盖：工具的路径防护（含 `write_file`/`patch_file` 专用的 `resolve_repository_write_path()`）、七个具体工具的正确性（`list_files`/`read_file`/`git_status`/`git_diff`/`write_file`/`patch_file`/`run_test`）、共享写入内核 `file_writer.py`、`run_test` 的命令白名单加载校验（`test_policy.py`）与受限 subprocess 执行层（`test_runner.py`：`shell=False`、超时、输出截断、cwd 隔离）、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy`/`TestPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关、`file_mutation` 审计事件的生成/排除条件）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）、`executor_factory.py` 的 Agent 能力隔离（`tests/test_executor_factory.py`：合成 policy + 加载真实 `agents/agent-general`/`agents/agent-coder` 两份 `tool-policy.json` 双重验证）、错误分类（`tests/test_run_errors.py`：6 类 `RunErrorCategory` 与默认可重试性）、`RunService`（`tests/test_run_service.py`：成功路径的 `RunServiceResult`、simulated 风格的空 usage 字段、`LIMIT_EXCEEDED`→`interrupted` 与未分类错误→`failed` 两种失败路径、`resume()` 的崩溃检测/新建 Run/`retry_of` 链接/拒绝重跑非法状态）。
 
 > 注意：`pytest` 需要在装了 `anthropic`/`python-dotenv` 的同一个环境（`.venv`）里跑，否则涉及 Anthropic Provider 的测试会因为 `ModuleNotFoundError: No module named 'anthropic'` 而无法 collect。
 
@@ -334,6 +343,8 @@ cp .env.example .env
 
 `patch_file` 也用这套方法做过一次真实 API 验收（`tasks/task-patch-test` 的 run-001）：任务要求 `agent-coder` 把 `sandbox/hello.py` 里的 `print("Hello")` 改成 `print("Hello Agent")`，明确要求必须用 `patch_file`、不能用 `write_file`。真实调用序列是 `read_file` → `patch_file`（`old_text` 用了 `"def greet():\n    print(\"Hello\")"` 整块而不是只匹配 `"Hello"`，避免歧义匹配）→ `read_file` 自我验证 → 结束。`events.jsonl` 里全程没有出现 `write_file`，且产生了 `file_mutation`（`operation: "patch"`）事件，文件内容与预期完全一致。
 
+`read_file` → `patch_file` → `run_test` 串成一个完整的"自主修复循环"也做过真实 API 验收（`tasks/task-run-test-loop` 的 run-001）：`sandbox/calculator.py` 里故意写错了 `add()`（`return a - b`），`sandbox/test_calculator.py` 断言 `add(2, 3) == 5` 因此失败；任务描述只说"有个测试失败了，修好它"，**没有告诉模型答案**。真实调用序列是 `read_file`（先后读了 `calculator.py` 和 `test_calculator.py`）→ `patch_file`（`old_text`/`new_text` 各是完整的两行函数体）→ `run_test(test_name="unit")`，`ToolResult.metadata` 里 `exit_code: 0`，随后模型才给出最终总结。这次只用了一轮 `patch_file` 就修对了，所以没有观察到"改错了、`run_test` 报失败、再改一次"这种真正的重试路径——如果要验证重试路径，需要设计一个模型第一次大概率会改错的任务，目前还没有这样的案例。
+
 ## 一个独立的、更早期的原型：容器化 Agent Runtime
 
 `runtime/`（`Dockerfile` + `agent.sh`）和 `scripts/`（`run-agent.sh`/`stop-agent.sh`/`status-agent.sh`/`logs-agent.sh`/`remove-agent.sh`）是这个项目更早期的一版思路留下的：把每个 Agent 跑成一个独立的 Docker 容器，通过 shell 脚本管理容器生命周期。目前 `agent.sh` 里的"执行任务"部分只是 `sleep 5` 加写一个占位输出文件，**还没有和上面 `src/` 里的 Task/Run/Agent 主链路打通**。这部分可以理解为容器化隔离运行时的技术验证草稿，如果要用起来还需要单独规划。
@@ -342,7 +353,7 @@ cp .env.example .env
 
 - 纯文件系统持久化（JSON + Markdown），没有数据库，也没有并发写保护——多进程同时操作同一个 Task/Run 会有竞态风险。
 - `write_file` 只支持整篇创建/覆盖，没有 append 能力；局部编辑现在由 `patch_file` 覆盖（唯一匹配的文本替换），但 `patch_file` 只能替换单个精确匹配的文本块，不支持传统的多段 unified diff 一次应用多处修改。
-- 目前还没有受限的命令/测试执行工具（比如跑 `pytest`/`ruff` 之类），Agent 改完代码后无法自己验证改动是否通过测试。
+- `run_test` 只能跑 `src/config/test_policy.json` 里预先注册好的命令（目前是整个 `pytest -q` 套件和 `compileall`），不能只跑某一个测试文件/测试函数——Agent 想验证一处小改动，也得等全量测试跑完（当前项目规模下约 3~4 秒，可接受，但会随测试量增长变慢）。
 - `JsonlRunEventSink` 每次 `emit()` 都单独 open/append/close 文件，实现简单、异常安全，但工具调用非常频繁时会有额外的文件系统开销——目前项目规模下可以接受，量级上去后可以换成常驻文件句柄。
 - 目前没有正式的"创建 Run"命令/流程——本 README 里所有 `run-NNN` 都是手动创建 `run.json`/`input.md` 再把 `task.json.current_run_id` 指过去的；因此也没有用到状态机里理论上存在的 `pending` 状态，Run 一创建出来就是 `in_progress`。
 - `resume` 用扫描全部 Task 的 `runs/` 目录来按 `run_id` 反查所属 Task，Run 数量大了以后是线性开销；状态机里 `interrupted → failed`（放弃重试）还没有对应的 CLI 命令，需要手动改 `run.json`。
