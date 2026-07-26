@@ -1,8 +1,11 @@
 import argparse
 from pathlib import Path
 
+from src.cli.run_display import format_run_inspection, format_run_list
 from src.config.settings import Settings
 from src.context_builder import RunContextBuilder
+from src.domain.events.event_repository import EventRepository
+from src.domain.events.timeline_builder import TimelineBuilder
 from src.executor_factory import create_run_executor
 from src.repositories import (
     AgentRepository,
@@ -14,6 +17,7 @@ from src.review.snapshot_repository import (
     SnapshotNotFoundError,
     SnapshotRepository,
 )
+from src.run_query_service import RunQueryService
 from src.run_service import RunExecutionFailedError, RunService
 
 
@@ -53,6 +57,14 @@ run_service = RunService(
 
 snapshot_repository = SnapshotRepository()
 review_service = ReviewService()
+
+run_query_service = RunQueryService(
+    task_repository=task_repository,
+    run_repository=run_repository,
+    event_repository=EventRepository(),
+    snapshot_repository=snapshot_repository,
+    timeline_builder=TimelineBuilder(),
+)
 
 
 def list_tasks() -> None:
@@ -172,6 +184,14 @@ def review_run(run_id: str) -> None:
         print("No decision made. Run remains awaiting_review.")
 
 
+def list_runs() -> None:
+    print(format_run_list(run_query_service.list_runs()))
+
+
+def inspect_run(run_id: str) -> None:
+    print(format_run_inspection(run_query_service.inspect_run(run_id)))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -225,6 +245,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run ID to review, for example run-030.",
     )
 
+    subparsers.add_parser(
+        "runs",
+        help="List all runs across all tasks.",
+    )
+
+    inspect_parser = subparsers.add_parser(
+        "inspect",
+        help="Show a run's timeline, changed files, and test results.",
+    )
+
+    inspect_parser.add_argument(
+        "run_id",
+        help="Run ID to inspect, for example run-030.",
+    )
+
     return parser
 
 
@@ -241,6 +276,10 @@ def main() -> None:
             resume_run(args.run_id)
         elif args.command == "review":
             review_run(args.run_id)
+        elif args.command == "runs":
+            list_runs()
+        elif args.command == "inspect":
+            inspect_run(args.run_id)
     except RunExecutionFailedError as error:
         print(f"Run failed: {error.run_id}")
         print(f"Status: {error.status}")

@@ -235,7 +235,69 @@ Approve? [y/N]:
 - 输入 `y`/`yes` → `RunService.decide_review(run_id, approved=True)` → 状态变 `approved`；输入 `n`/`no`/`reject` → 状态变 `rejected`；其它任何输入（包括直接回车）→ 不做任何状态变更，Run 继续留在 `awaiting_review`，可以以后再审。
 - `ReviewReport`（`src/review/review_report.py`：`run_id`/`summary`/`changed_files`/`risks`/`approved`）目前 `summary`/`risks` 恒为 `None`/`[]`——`ReviewService.build_report()`（`src/review/review_service.py`）故意设计成纯函数、不做任何 I/O，这样以后接一个真正的 Reviewer Agent 去填 `summary`/`risks` 时，不需要碰这一层的接口。
 
-`src/review/NOTES.md` 记了一个已知的未来演化点：`ChangeSnapshot.test_results` 现在是"按工具名存一条结果"，多次调用同一个测试工具会互相覆盖；如果以后一次 Run 需要跑多个不同测试命令并且都要保留结果，这个字段的形状需要从 dict 换成 list。现在不改，只是先记下来。
+`src/review/NOTES.md` 记了一个已知的未来演化点：`ChangeSnapshot.test_results` 现在是"按工具名存一条结果"，多次调用同一个测试工具会互相覆盖；如果以后一次 Run 需要跑多个不同测试命令并且都要保留结果，这个字段的形状需要从 dict 换成 list。现在不改，只是先记下来。同一份文件还记了一次预 5C-5 的架构自查（`review/` 没跟随 `tools/` 已经建立的 `domain`/`services` 分层规范、`RunService` 职责在变多、`review_policy.requires_review()` 硬编码了 `"agent-coder"` 这个 agent id 而不是按能力判断）——都只是记录，没有据此改代码。
+
+### 查询与诊断：`runs`/`inspect` 命令
+
+前面这些命令（`run`/`resume`/`review`）都会**改变** Run 的状态，是"command side"。5C-5 加了一条纯只读的"query side"，专门用来回答"发生了什么"，不改任何东西：
+
+```
+events.jsonl
+      │
+      ▼
+EventRepository.load_events()   # 逐行读 JSON，缺文件/空文件返回 []，缺 "type" 字段 fallback 成 "unknown"
+      │
+      ▼
+list[RunEvent]                  # src/domain/events/run_event.py，纯数据：event_type/timestamp/run_id/data（data 保留完整原始 payload）
+      │
+      ▼
+TimelineBuilder.build()         # 只做包装，不排序、不重新解释
+      │
+      ▼
+RunTimeline(run_id, events)
+```
+
+`RunQueryService`（`src/run_query_service.py`）是这条链路的入口，和 `RunService` 是刻意分开的两个类——`RunService` 执行/改状态，`RunQueryService` 只读，两者都依赖同样的 `TaskRepository`/`RunRepository`，但互不调用对方的方法（`RunQueryService` 自己重新实现了一个几行的"按 run_id 反查 task"逻辑，没有复用 `RunService` 里那个私有方法，这是有意的，query side 不应该依赖 command side）。
+
+```bash
+# 列出所有 Task 下的所有 Run
+python -m src.main runs
+
+# 查看单个 Run 的时间线/变更/测试结果
+python -m src.main inspect <run-id>
+```
+
+```text
+$ python -m src.main inspect run-026
+Run: run-026
+Task: task-20260713-001
+Agent: agent-general
+
+Status:
+completed
+
+Timeline:
+1. llm_response
+2. tool_call list_files
+3. tool_result list_files
+4. llm_response
+5. tool_call read_file
+6. tool_result read_file
+7. llm_response
+8. run_completed
+
+Changes:
+(none)
+
+Tests:
+(none)
+```
+
+- `runs` 每一行的"Changes: N files"直接读 `run.json` 里 `metadata.changed_files`（5C-4C 起 `RunService.execute()` 就一直在存这个字段），不会为了列表页面去逐个 Run 加载 `ChangeSnapshot`。
+- `inspect` 组合三样东西：`run.json`（状态/agent）、`RunTimeline`（事件时间线）、`ChangeSnapshot`（有就显示，没有就显示"(none)"）——三者中任意一个缺失（没有 `events.jsonl`、没有 `change_snapshot.json`）都不报错，这对 5C-4 之前的历史 Run（比如 `task-20260713-001` 早期几十个 Run）尤其重要，它们连 `events.jsonl` 都没有。
+- Timeline 每一行的展示格式（`tool_call read_file`、`file_mutation patch` 这种）是 `src/cli/run_display.py` 里做的——这是特意设计的：`RunEvent`/`RunTimeline` 这两层保持"哑"，不做任何解释，把"怎么显示"这件事完全交给一个独立的展示层，以后 Web UI/Discord bot/API 要复用同一份查询逻辑时，不需要重新解析 `events.jsonl`，也不用继承 CLI 的打印格式。
+- **已知限制**：真实的 `events.jsonl` 里从来没有出现过 `timestamp` 字段（`llm_executor.py` 用 `round` 排序，不是墙钟时间），所以 `RunEvent.timestamp` 目前恒为 `None`——Timeline 现在完全靠 `events.jsonl` 本身的 append 顺序（`TimelineBuilder` 不排序，原样保留读取顺序）。
+- `inspect <run-id>` 和 `resume`/`review` 共享同一个"按 run_id 反查 task"的已知限制：`run_id` 只在单个 Task 内保证唯一，跨 Task 撞号时会解析到（按目录字母序）第一个匹配的 Task——不是这次新引入的问题。
 
 ## 架构分层
 
@@ -246,6 +308,7 @@ src/
 ├── execution.py           # RunExecutor 协议（Protocol）：execute(context) -> RunExecutionResult
 ├── context_builder.py     # 把 Task+Run+Agent 拼成一份带项目快照的 RunExecutionContext
 ├── run_service.py         # 编排一次 Run 的完整生命周期：加载→校验→执行→落盘→标记完成/interrupted/failed；execute()/resume() 都返回 RunServiceResult，失败时抛 RunExecutionFailedError
+├── run_query_service.py   # RunQueryService（5C-5）：只读的 query side，list_runs()/inspect_run()，不改任何状态
 ├── run_errors.py          # 错误分类：classify_error() 把异常映射到 6 类 RunErrorCategory，is_retryable() 给出默认可重试性
 ├── executor_factory.py    # 按 EXECUTION_MODE 组装对应的 RunExecutor（simulated / llm）
 ├── simulated_executor.py  # 确定性占位执行器
@@ -258,6 +321,13 @@ src/
 │   ├── anthropic_provider.py
 │   └── exceptions.py       # 细分的 LLM*Error 异常层级
 ├── domain/tools/           # 工具调用的领域类型：ToolDefinition / ToolCall / ToolResult
+├── domain/events/          # 运行事件的领域类型（5C-5）
+│   ├── run_event.py               # RunEvent：event_type/timestamp/run_id/data（data 保留完整原始 payload，不裁剪）
+│   ├── event_repository.py        # EventRepository：把 events.jsonl 逐行读成 list[RunEvent]，缺文件返回 []
+│   ├── timeline.py                 # RunTimeline：run_id + events，纯包装
+│   └── timeline_builder.py         # TimelineBuilder：list[RunEvent] -> RunTimeline，不排序、不重新解释
+├── cli/                    # CLI 展示层（5C-5），和查询/执行逻辑分开，纯函数（输入数据，输出字符串，不 print）
+│   └── run_display.py             # format_run_list() / format_run_inspection()
 ├── review/                # 人工审核层（5C-4）
 │   ├── change_snapshot.py         # ChangeSnapshot：一次 Run 的变更事实（changed_files/mutation_count/test_results/diff_path）
 │   ├── change_snapshot_builder.py # 从 events.jsonl 构建 ChangeSnapshot
@@ -326,6 +396,10 @@ cp .env.example .env
 # 4c. 查看一个 awaiting_review 的 Run（改动了什么/测试结果），并 approve/reject
 .venv/bin/python -m src.main review <run-id>
 
+# 4d. 列出所有 Task 下的所有 Run / 查看单个 Run 的时间线
+.venv/bin/python -m src.main runs
+.venv/bin/python -m src.main inspect <run-id>
+
 # 5. 跑测试
 .venv/bin/python -m pytest tests/
 ```
@@ -351,7 +425,7 @@ cp .env.example .env
 .venv/bin/python -m pytest tests/ -v
 ```
 
-当前 279 个测试，覆盖：工具的路径防护（含 `write_file`/`patch_file` 专用的 `resolve_repository_write_path()`）、七个具体工具的正确性（`list_files`/`read_file`/`git_status`/`git_diff`/`write_file`/`patch_file`/`run_test`）、共享写入内核 `file_writer.py`、`run_test` 的命令白名单加载校验（`test_policy.py`）与受限 subprocess 执行层（`test_runner.py`：`shell=False`、超时、输出截断、cwd 隔离）、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy`/`TestPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关、`file_mutation` 审计事件的生成/排除条件）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）、`executor_factory.py` 的 Agent 能力隔离（`tests/test_executor_factory.py`：合成 policy + 加载真实 `agents/agent-general`/`agents/agent-coder` 两份 `tool-policy.json` 双重验证）、错误分类（`tests/test_run_errors.py`：6 类 `RunErrorCategory` 与默认可重试性）、`RunService`（`tests/test_run_service.py`：成功路径的 `RunServiceResult`、simulated 风格的空 usage 字段、`LIMIT_EXCEEDED`→`interrupted` 与未分类错误→`failed` 两种失败路径、`resume()` 的崩溃检测/新建 Run/`retry_of` 链接/拒绝重跑非法状态、`awaiting_review`/`approved`/`rejected` 状态转换、`get_run()`/`decide_review()`）、`src/review/` 人工审核层（`tests/review/`：`ChangeSnapshot`/`ChangeSnapshotBuilder`/`SnapshotRepository`/`review_policy.requires_review()`/`ReviewService`/`ReviewReport`，共 26 个测试）。
+当前 314 个测试，覆盖：`src/domain/events/`（`tests/domain/events/`：`RunEvent`/`EventRepository`——含读取真实历史 `events.jsonl`/`TimelineBuilder`，共 18 个测试）、`RunQueryService`（`tests/test_run_query_service.py`：跨 Task 汇总 `list_runs()`、`inspect_run()` 的找到/找不到、缺 events/缺 snapshot 时的优雅降级、真实持久化 snapshot 的加载）、`src/cli/run_display.py`（`tests/cli/`：Run 列表/Timeline/变更/测试结果的纯文本渲染，含复数形式、空状态）、工具的路径防护（含 `write_file`/`patch_file` 专用的 `resolve_repository_write_path()`）、七个具体工具的正确性（`list_files`/`read_file`/`git_status`/`git_diff`/`write_file`/`patch_file`/`run_test`）、共享写入内核 `file_writer.py`、`run_test` 的命令白名单加载校验（`test_policy.py`）与受限 subprocess 执行层（`test_runner.py`：`shell=False`、超时、输出截断、cwd 隔离）、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy`/`TestPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关、`file_mutation` 审计事件的生成/排除条件）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）、`executor_factory.py` 的 Agent 能力隔离（`tests/test_executor_factory.py`：合成 policy + 加载真实 `agents/agent-general`/`agents/agent-coder` 两份 `tool-policy.json` 双重验证）、错误分类（`tests/test_run_errors.py`：6 类 `RunErrorCategory` 与默认可重试性）、`RunService`（`tests/test_run_service.py`：成功路径的 `RunServiceResult`、simulated 风格的空 usage 字段、`LIMIT_EXCEEDED`→`interrupted` 与未分类错误→`failed` 两种失败路径、`resume()` 的崩溃检测/新建 Run/`retry_of` 链接/拒绝重跑非法状态、`awaiting_review`/`approved`/`rejected` 状态转换、`get_run()`/`decide_review()`）、`src/review/` 人工审核层（`tests/review/`：`ChangeSnapshot`/`ChangeSnapshotBuilder`/`SnapshotRepository`/`review_policy.requires_review()`/`ReviewService`/`ReviewReport`，共 26 个测试）。
 
 > 注意：`pytest` 需要在装了 `anthropic`/`python-dotenv` 的同一个环境（`.venv`）里跑，否则涉及 Anthropic Provider 的测试会因为 `ModuleNotFoundError: No module named 'anthropic'` 而无法 collect。
 
@@ -433,7 +507,8 @@ cp .env.example .env
 - `run_test` 只能跑 `src/config/test_policy.json` 里预先注册好的命令（目前是整个 `pytest -q` 套件和 `compileall`），不能只跑某一个测试文件/测试函数——Agent 想验证一处小改动，也得等全量测试跑完（当前项目规模下约 3~4 秒，可接受，但会随测试量增长变慢）。
 - `JsonlRunEventSink` 每次 `emit()` 都单独 open/append/close 文件，实现简单、异常安全，但工具调用非常频繁时会有额外的文件系统开销——目前项目规模下可以接受，量级上去后可以换成常驻文件句柄。
 - 目前没有正式的"创建 Run"命令/流程——本 README 里所有 `run-NNN` 都是手动创建 `run.json`/`input.md` 再把 `task.json.current_run_id` 指过去的；因此也没有用到状态机里理论上存在的 `pending` 状态，Run 一创建出来就是 `in_progress`。
-- `resume`/`review`/`get_run()` 都是用扫描全部 Task 的 `runs/` 目录来按 `run_id` 反查所属 Task，Run 数量大了以后是线性开销；`run_id` 本身只在单个 Task 内保证唯一，跨 Task 撞号时会静默解析到（按 Task 目录字母序）第一个匹配的——手工测试 `review` 时实际踩到过这个问题（见 `tasks/task-5c4d-review-cli-verification/background.md`），不是 5C-4 新引入的，`resume` 早就有同样的行为。状态机里 `interrupted → failed`（放弃转重试为放弃）还没有对应的 CLI 命令，需要手动改 `run.json`。
+- `resume`/`review`/`get_run()`/`inspect`（`RunQueryService` 自己也重新实现了一遍同样的查找）都是用扫描全部 Task 的 `runs/` 目录来按 `run_id` 反查所属 Task，Run 数量大了以后是线性开销；`run_id` 本身只在单个 Task 内保证唯一，跨 Task 撞号时会静默解析到（按 Task 目录字母序）第一个匹配的——手工测试 `review`/`inspect` 时都实际踩到过这个问题，不是 5C-4/5C-5 新引入的，`resume` 早就有同样的行为。状态机里 `interrupted → failed`（放弃转重试为放弃）还没有对应的 CLI 命令，需要手动改 `run.json`。
+- `RunEvent.timestamp` 目前恒为 `None`：真实 `events.jsonl` 从来没有 `timestamp` 字段（`llm_executor.py` 用 `round` 排序，不是墙钟时间），`TimelineBuilder` 也刻意不做排序——完全依赖 `events.jsonl` 本身的 append 顺序。如果以后需要跨 Run 按时间对齐事件（而不只是看单个 Run 内部的先后顺序），需要先让 `llm_executor.py` 真正写入时间戳。
 - `review` 命令目前没有 Reviewer Agent：`ReviewReport.summary`/`risks` 恒为 `None`/`[]`，diff 内容也从不生成（`ChangeSnapshot.diff_path` 目前恒为 `null`，因为没有代码会写 `diff.patch`）——审核时只能看 `changed_files`/`mutation_count`/`test_results`，看不到具体改了什么行。approve/reject 也只是把 `run.json.status` 改成 `approved`/`rejected`，不会自动 `git commit`。
 - 容器化 Agent Runtime（`runtime/` + `scripts/`）与主执行链路是两套独立的东西，尚未整合。
 - 只支持 Anthropic 一家 provider；`LLMProvider` 协议本身是 provider 无关的，理论上可以扩展。
