@@ -237,6 +237,26 @@ class AgentRepository:
         )
         return AgentDefinition.from_dict(data)
 
+    def list_all(self) -> list[AgentDefinition]:
+        if not self._agents_dir.exists():
+            return []
+
+        agents: list[AgentDefinition] = []
+
+        for agent_dir in sorted(self._agents_dir.iterdir()):
+            if not agent_dir.is_dir():
+                continue
+
+            agent_file = agent_dir / "agent.json"
+
+            if not agent_file.exists():
+                continue
+
+            data = JsonRepository.load(agent_file)
+            agents.append(AgentDefinition.from_dict(data))
+
+        return agents
+
     def read_system_prompt(self, agent_id: str) -> str:
         return TextRepository.read(
             self.get_system_prompt_file(agent_id)

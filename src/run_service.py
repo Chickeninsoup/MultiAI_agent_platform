@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from pathlib import Path
 
+from src.clock import utc_now
 from src.context_builder import RunContextBuilder
 from src.execution import RunExecutor
 from src.models import RunDefinition, TaskDefinition
@@ -16,15 +16,6 @@ from src.review.snapshot_repository import SnapshotRepository
 from src.run_errors import RunErrorCategory, classify_error, is_retryable
 
 RESUMABLE_STATUSES = {"in_progress", "interrupted"}
-
-
-def utc_now() -> str:
-    return (
-        datetime.now(timezone.utc)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
 
 
 @dataclass(frozen=True)
