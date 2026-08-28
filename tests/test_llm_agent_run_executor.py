@@ -86,6 +86,7 @@ def _build_agent(
         owner="owner-1",
         status="active",
         role="engineer",
+        template_id="engineer",
         default_model=default_model,
         credential_id="cred-1",
         system_prompt_path="system-prompt.md",
@@ -280,18 +281,22 @@ def test_executes_run_through_multi_round_tool_loop(
     ]
 
     assert [event["type"] for event in events] == [
+        "compaction_report",
+        "context_usage",
         "llm_response",
         "tool_call",
         "tool_result",
+        "compaction_report",
+        "context_usage",
         "llm_response",
         "run_completed",
     ]
 
-    tool_call_event = events[1]
+    tool_call_event = events[3]
     assert tool_call_event["name"] == "read_file"
     assert tool_call_event["input"] == {"path": "example.txt"}
 
-    tool_result_event = events[2]
+    tool_result_event = events[4]
     assert tool_result_event["name"] == "read_file"
     assert tool_result_event["success"] is True
     assert tool_result_event["output_chars"] == len("1: hello world")

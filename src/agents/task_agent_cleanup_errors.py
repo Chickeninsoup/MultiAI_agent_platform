@@ -1,0 +1,2 @@
+class TaskNotFoundForCleanupError(ValueError):
+    pass

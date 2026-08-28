@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+from src.execution_failure import ExecutionFailure, FailureCategory
+from src.failure_classifier import FailureClassifier
 from src.step_execution_result import StepExecutionResult, StepStatus
 from src.task_dependency_resolver import TaskDependencyResolver
 from src.task_plan import TaskPlan, TaskStep
@@ -41,6 +43,14 @@ class SleepingExecutor:
         return step.step_id
 
 
+class RaisingExecutor:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def execute_step(self, step: TaskStep, task_id: str) -> str:
+        raise self._exc
+
+
 def test_run_dispatches_every_step_in_a_single_wave() -> None:
     step_a = TaskStep(
         step_id="a", agent_id="agent-coder", description="do a"
@@ -49,7 +59,9 @@ def test_run_dispatches_every_step_in_a_single_wave() -> None:
         step_id="b", agent_id="agent-coder", description="do b"
     )
     executor = FakeExecutor()
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(task_id="task-001", steps=[step_a, step_b])
 
     scheduler.run(plan)
@@ -68,7 +80,9 @@ def test_run_dispatches_dependent_steps_in_separate_waves() -> None:
         depends_on=["a"],
     )
     executor = FakeExecutor()
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(task_id="task-001", steps=[step_a, step_b])
 
     scheduler.run(plan)
@@ -84,7 +98,9 @@ def test_run_preserves_step_order_within_a_wave() -> None:
         step_id="b", agent_id="agent-coder", description="do b"
     )
     executor = FakeExecutor()
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(task_id="task-001", steps=[step_a, step_b])
 
     results = scheduler.run(plan)
@@ -110,7 +126,9 @@ def test_run_merges_results_from_every_wave() -> None:
         depends_on=["a"],
     )
     executor = FakeExecutor()
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(task_id="task-001", steps=[step_a, step_b])
 
     results = scheduler.run(plan)
@@ -127,7 +145,9 @@ def test_run_merges_results_from_every_wave() -> None:
 
 def test_run_returns_empty_list_for_empty_plan() -> None:
     executor = FakeExecutor()
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(task_id="task-001", steps=[])
 
     assert scheduler.run(plan) == []
@@ -142,7 +162,9 @@ def test_run_executes_independent_steps_in_a_wave_concurrently() -> None:
         step_id="b", agent_id="agent-b", description="do b"
     )
     executor = SleepingExecutor(delay=0.2)
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(task_id="task-001", steps=[step_a, step_b])
 
     start = time.monotonic()
@@ -165,7 +187,9 @@ def test_run_reports_a_failed_step_without_crashing_its_wave() -> None:
     executor = SometimesFailingExecutor(
         failing_step_ids={"b"}, error="LLM timeout"
     )
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(
         task_id="task-001", steps=[step_a, step_b, step_c]
     )
@@ -177,7 +201,14 @@ def test_run_reports_a_failed_step_without_crashing_its_wave() -> None:
             step_id="a", status=StepStatus.SUCCESS, output="a-done"
         ),
         StepExecutionResult(
-            step_id="b", status=StepStatus.FAILED, error="LLM timeout"
+            step_id="b",
+            status=StepStatus.FAILED,
+            error="LLM timeout",
+            failure=ExecutionFailure(
+                category=FailureCategory.FATAL,
+                message="LLM timeout",
+                step_id="b",
+            ),
         ),
         StepExecutionResult(
             step_id="c", status=StepStatus.SUCCESS, output="c-done"
@@ -198,7 +229,9 @@ def test_run_skips_a_step_whose_dependency_failed() -> None:
     executor = SometimesFailingExecutor(
         failing_step_ids={"a"}, error="Unknown agent: missing"
     )
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(task_id="task-001", steps=[step_a, step_b])
 
     results = scheduler.run(plan)
@@ -208,6 +241,11 @@ def test_run_skips_a_step_whose_dependency_failed() -> None:
             step_id="a",
             status=StepStatus.FAILED,
             error="Unknown agent: missing",
+            failure=ExecutionFailure(
+                category=FailureCategory.FATAL,
+                message="Unknown agent: missing",
+                step_id="a",
+            ),
         ),
         StepExecutionResult(
             step_id="b",
@@ -230,14 +268,23 @@ def test_run_does_not_skip_an_independent_step_when_another_fails() -> (
     executor = SometimesFailingExecutor(
         failing_step_ids={"a"}, error="boom"
     )
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(task_id="task-001", steps=[step_a, step_b])
 
     results = scheduler.run(plan)
 
     assert results == [
         StepExecutionResult(
-            step_id="a", status=StepStatus.FAILED, error="boom"
+            step_id="a",
+            status=StepStatus.FAILED,
+            error="boom",
+            failure=ExecutionFailure(
+                category=FailureCategory.FATAL,
+                message="boom",
+                step_id="a",
+            ),
         ),
         StepExecutionResult(
             step_id="b", status=StepStatus.SUCCESS, output="b-done"
@@ -264,7 +311,9 @@ def test_run_propagates_skip_across_multiple_dependency_levels() -> None:
     executor = SometimesFailingExecutor(
         failing_step_ids={"a"}, error="research failed"
     )
-    scheduler = TaskScheduler(TaskDependencyResolver(), executor)
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
     plan = TaskPlan(
         task_id="task-001", steps=[step_a, step_b, step_c]
     )
@@ -276,6 +325,11 @@ def test_run_propagates_skip_across_multiple_dependency_levels() -> None:
             step_id="a",
             status=StepStatus.FAILED,
             error="research failed",
+            failure=ExecutionFailure(
+                category=FailureCategory.FATAL,
+                message="research failed",
+                step_id="a",
+            ),
         ),
         StepExecutionResult(
             step_id="b",
@@ -289,3 +343,79 @@ def test_run_propagates_skip_across_multiple_dependency_levels() -> None:
         ),
     ]
     assert [step.step_id for step in executor.calls] == ["a"]
+
+
+def _single_step_plan() -> TaskPlan:
+    return TaskPlan(
+        task_id="task-001",
+        steps=[
+            TaskStep(
+                step_id="a", agent_id="agent-a", description="do a"
+            )
+        ],
+    )
+
+
+def test_a_real_timeout_is_classified_as_temporary_error() -> None:
+    executor = RaisingExecutor(TimeoutError("provider timeout"))
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
+
+    result = scheduler.run(_single_step_plan())[0]
+
+    assert result.status == StepStatus.FAILED
+    assert result.failure is not None
+    assert result.failure.category == FailureCategory.TEMPORARY_ERROR
+
+
+def test_a_real_permission_error_is_classified_as_blocked() -> None:
+    executor = RaisingExecutor(PermissionError("access denied"))
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
+
+    result = scheduler.run(_single_step_plan())[0]
+
+    assert result.failure is not None
+    assert result.failure.category == FailureCategory.BLOCKED
+
+
+def test_a_real_unknown_exception_is_classified_as_fatal() -> None:
+    class CustomError(Exception):
+        pass
+
+    executor = RaisingExecutor(CustomError("boom"))
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
+
+    result = scheduler.run(_single_step_plan())[0]
+
+    assert result.failure is not None
+    assert result.failure.category == FailureCategory.FATAL
+
+
+def test_error_and_failure_message_stay_in_sync() -> None:
+    executor = RaisingExecutor(TimeoutError("provider timeout"))
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
+
+    result = scheduler.run(_single_step_plan())[0]
+
+    assert result.error == "provider timeout"
+    assert result.failure is not None
+    assert result.failure.message == result.error
+
+
+def test_success_path_produces_no_failure() -> None:
+    executor = FakeExecutor()
+    scheduler = TaskScheduler(
+        TaskDependencyResolver(), executor, FailureClassifier()
+    )
+
+    result = scheduler.run(_single_step_plan())[0]
+
+    assert result.status == StepStatus.SUCCESS
+    assert result.failure is None

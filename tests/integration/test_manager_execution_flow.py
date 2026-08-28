@@ -4,11 +4,26 @@ import pytest
 
 from src.agent_handlers.llm_agent_handler import LLMAgentHandler
 from src.agent_message import AgentMessage
+from src.agents.task_agent import TaskAgent
+from src.agents.task_agent_registry import TaskAgentRegistry
 from src.manager_agent import ManagerAgent
 from src.message_router import MessageRouter
 from src.task_plan import TaskPlan, TaskStep
 from src.task_plan_converter import TaskPlanConverter
 from src.task_plan_executor import TaskPlanExecutor
+
+
+def _registry(task_id: str, *agent_ids: str) -> TaskAgentRegistry:
+    registry = TaskAgentRegistry()
+
+    for agent_id in agent_ids:
+        registry.assign_agent(
+            TaskAgent(
+                agent_id=agent_id, task_id=task_id, template_id="t"
+            )
+        )
+
+    return registry
 
 
 class FakeAgent:
@@ -27,7 +42,9 @@ class FakeAgent:
 
 def test_manager_execution_flow() -> None:
     agent = FakeAgent("agent-coder")
-    router = MessageRouter([agent])
+    router = MessageRouter(
+        [agent], _registry("task-001", "agent-coder")
+    )
     converter = TaskPlanConverter()
     executor = TaskPlanExecutor(converter, router)
     manager = ManagerAgent()
@@ -56,7 +73,10 @@ def test_manager_execution_flow() -> None:
 def test_multi_step_plan_executes_each_step_in_order() -> None:
     agent_a = FakeAgent("agent-a")
     agent_b = FakeAgent("agent-b")
-    router = MessageRouter([agent_a, agent_b])
+    router = MessageRouter(
+        [agent_a, agent_b],
+        _registry("task-002", "agent-a", "agent-b"),
+    )
     executor = TaskPlanExecutor(TaskPlanConverter(), router)
 
     plan = TaskPlan(
@@ -86,7 +106,10 @@ def test_multi_step_plan_executes_each_step_in_order() -> None:
 
 
 def test_execute_raises_for_unknown_agent() -> None:
-    router = MessageRouter([])
+    # "missing" is assigned to task-003 (membership passes) but no
+    # handler for it was ever built - this is specifically testing
+    # the "assigned but unreachable" runtime error, not authorization.
+    router = MessageRouter([], _registry("task-003", "missing"))
     executor = TaskPlanExecutor(TaskPlanConverter(), router)
 
     plan = TaskPlan(
@@ -141,7 +164,10 @@ def test_manager_request_reaches_task_and_run_services_via_real_handler() -> (
     run_service = FakeRunService()
     handler = LLMAgentHandler("agent-coder", task_service, run_service)
     executor = TaskPlanExecutor(
-        TaskPlanConverter(), MessageRouter([handler])
+        TaskPlanConverter(),
+        MessageRouter(
+            [handler], _registry("task-001", "agent-coder")
+        ),
     )
     manager = ManagerAgent()
 

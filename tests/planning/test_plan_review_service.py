@@ -18,9 +18,25 @@ class FakeAgentRegistry:
         return self._agents
 
 
+class FakeTaskAgent:
+    def __init__(self, agent_id: str) -> None:
+        self.agent_id = agent_id
+
+
+class FakeTaskAgentRegistry:
+    def __init__(self, agent_ids: list[str]) -> None:
+        self._agents = [FakeTaskAgent(agent_id) for agent_id in agent_ids]
+
+    def list_agents(self, task_id: str) -> list[FakeTaskAgent]:
+        return self._agents
+
+
 def _service(agent_ids: list[str]) -> PlanReviewService:
     return PlanReviewService(
-        PlanValidator(FakeAgentRegistry(agent_ids))
+        PlanValidator(
+            FakeAgentRegistry(agent_ids),
+            FakeTaskAgentRegistry(agent_ids),
+        )
     )
 
 

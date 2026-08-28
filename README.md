@@ -347,6 +347,23 @@ src/
     └── handlers/             # 七个具体工具的实现
 ```
 
+上面这棵树覆盖的是 5C 阶段（工具调用 + 审核 + 观测）的模块；5D/5E 新增的编排、规划、恢复相关模块单独整理成了这几个目录（各自的职责见前面对应章节，不在这里重复展开整棵树）：
+
+```
+src/
+├── agent_registry.py / message_router.py / message_routing_errors.py   # Agent 发现 + 消息投递（5D-1/5D-2）
+├── task_plan.py / task_dependency_resolver.py / task_scheduler.py      # TaskPlan 模型 + 依赖排序 + 调度（5D）
+├── retry_policy.py / retry_manager.py / retry_decision.py / retry_result.py
+├── failure_classifier.py / failure_retry_classifier.py / step_execution_result.py
+├── manager_agent.py                                                     # ManagerAgent：request -> TaskPlan
+├── execution_checkpoint.py / execution_checkpoint_repository.py         # 恢复用的检查点（5E-5）
+├── recovery_*.py                                                        # RecoveryOrchestrator/Planner/Executor/Plan/Action
+├── runtime_approval_*.py                                                # 执行期人工审批闸门（5E-5）
+├── agents/                # Task-Scoped Agent 生命周期：AgentTemplate/TaskAgent/Registry/AssignmentService/CleanupService/TeamLifecycle
+├── context/                # Static Context Optimization：ContextSelector/ContextTrimmer/ContextBudget（含 history/ 子目录，即 History Compression）
+└── planning/               # Planner 协议、RuleBasedPlanner/ClaudePlanner、PlanValidator、PlanReview/Approval、PlanRepairLoop、PlanService/PlanExecutionService、TaskCompletionService、TaskPlanResumeService
+```
+
 配置和 Agent 定义：
 
 ```
@@ -361,6 +378,10 @@ src/config/
 tasks/<task-id>/
 ├── task.json             # 状态、当前 Run、Run 计数、完成标准
 ├── background.md         # 跨 Run 共享的累积背景
+├── plan.json              # PlanRecord：TaskPlan + status（pending/approved/rejected/executed），5D-6B-1
+├── approval.json          # ApprovalRecord：plan 命令的人工审批决定（approve-plan/reject-plan）
+├── runtime_approval.json  # RuntimeApprovalRequest：执行期 BLOCKED 失败的人工审批闸门（5E-5，与上面 approval.json 是两个独立文件）
+├── checkpoint.json        # ExecutionCheckpoint：恢复用的执行进度快照（5E-5，目前无 CheckpointWriter，靠手工构造）
 └── runs/run-NNN/
     ├── run.json               # 状态（in_progress/completed/awaiting_review/approved/rejected/interrupted/failed）、时间戳、（可选）retry_of/error_category/error_message/retryable/context_files/review_required/changed_files
     ├── input.md                # 本轮的具体指令
@@ -425,7 +446,7 @@ cp .env.example .env
 .venv/bin/python -m pytest tests/ -v
 ```
 
-当前 314 个测试，覆盖：`src/domain/events/`（`tests/domain/events/`：`RunEvent`/`EventRepository`——含读取真实历史 `events.jsonl`/`TimelineBuilder`，共 18 个测试）、`RunQueryService`（`tests/test_run_query_service.py`：跨 Task 汇总 `list_runs()`、`inspect_run()` 的找到/找不到、缺 events/缺 snapshot 时的优雅降级、真实持久化 snapshot 的加载）、`src/cli/run_display.py`（`tests/cli/`：Run 列表/Timeline/变更/测试结果的纯文本渲染，含复数形式、空状态）、工具的路径防护（含 `write_file`/`patch_file` 专用的 `resolve_repository_write_path()`）、七个具体工具的正确性（`list_files`/`read_file`/`git_status`/`git_diff`/`write_file`/`patch_file`/`run_test`）、共享写入内核 `file_writer.py`、`run_test` 的命令白名单加载校验（`test_policy.py`）与受限 subprocess 执行层（`test_runner.py`：`shell=False`、超时、输出截断、cwd 隔离）、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy`/`TestPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关、`file_mutation` 审计事件的生成/排除条件）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）、`executor_factory.py` 的 Agent 能力隔离（`tests/test_executor_factory.py`：合成 policy + 加载真实 `agents/agent-general`/`agents/agent-coder` 两份 `tool-policy.json` 双重验证）、错误分类（`tests/test_run_errors.py`：6 类 `RunErrorCategory` 与默认可重试性）、`RunService`（`tests/test_run_service.py`：成功路径的 `RunServiceResult`、simulated 风格的空 usage 字段、`LIMIT_EXCEEDED`→`interrupted` 与未分类错误→`failed` 两种失败路径、`resume()` 的崩溃检测/新建 Run/`retry_of` 链接/拒绝重跑非法状态、`awaiting_review`/`approved`/`rejected` 状态转换、`get_run()`/`decide_review()`）、`src/review/` 人工审核层（`tests/review/`：`ChangeSnapshot`/`ChangeSnapshotBuilder`/`SnapshotRepository`/`review_policy.requires_review()`/`ReviewService`/`ReviewReport`，共 26 个测试）。
+当前 996 个测试（5C 阶段 314 个之外，5D 任务编排/人工审批、5E Task-Scoped Agent、Claude 结构化规划、计划自修复、执行恢复与运行时审批、Static Context Optimization 这几块新增的测试占了大头，见上面各自章节末尾列出的测试文件），5C 阶段覆盖：`src/domain/events/`（`tests/domain/events/`：`RunEvent`/`EventRepository`——含读取真实历史 `events.jsonl`/`TimelineBuilder`，共 18 个测试）、`RunQueryService`（`tests/test_run_query_service.py`：跨 Task 汇总 `list_runs()`、`inspect_run()` 的找到/找不到、缺 events/缺 snapshot 时的优雅降级、真实持久化 snapshot 的加载）、`src/cli/run_display.py`（`tests/cli/`：Run 列表/Timeline/变更/测试结果的纯文本渲染，含复数形式、空状态）、工具的路径防护（含 `write_file`/`patch_file` 专用的 `resolve_repository_write_path()`）、七个具体工具的正确性（`list_files`/`read_file`/`git_status`/`git_diff`/`write_file`/`patch_file`/`run_test`）、共享写入内核 `file_writer.py`、`run_test` 的命令白名单加载校验（`test_policy.py`）与受限 subprocess 执行层（`test_runner.py`：`shell=False`、超时、输出截断、cwd 隔离）、`ToolExecutor` 的调度/策略/异常兜底逻辑（含 `duration_ms` 计时）、`ToolPolicy`/`TestPolicy` 的 JSON 解析校验、`AnthropicProvider` 的请求构造与响应解析（mock 掉真实网络请求）、`RunEventSink` 实现（`tests/test_run_events.py`：内存/JSONL/丢弃三种 sink，JSONL 的 unicode 与 truncate 行为）、`LLMRunExecutor` 的多轮循环行为（工具失败传播、轮次超限、累计 usage/events、中途异常仍保留已发生事件、debug 开关、`file_mutation` 审计事件的生成/排除条件）、`LLMAgentRunExecutor` 适配层（mock `LLMProvider`/`AgentRepository`，真实 `ToolExecutor`/`RunRepository`，含 events.jsonl 与 debug 模式，见 `tests/test_llm_agent_run_executor.py`）、`executor_factory.py` 的 Agent 能力隔离（`tests/test_executor_factory.py`：合成 policy + 加载真实 `agents/agent-general`/`agents/agent-coder` 两份 `tool-policy.json` 双重验证）、错误分类（`tests/test_run_errors.py`：6 类 `RunErrorCategory` 与默认可重试性）、`RunService`（`tests/test_run_service.py`：成功路径的 `RunServiceResult`、simulated 风格的空 usage 字段、`LIMIT_EXCEEDED`→`interrupted` 与未分类错误→`failed` 两种失败路径、`resume()` 的崩溃检测/新建 Run/`retry_of` 链接/拒绝重跑非法状态、`awaiting_review`/`approved`/`rejected` 状态转换、`get_run()`/`decide_review()`）、`src/review/` 人工审核层（`tests/review/`：`ChangeSnapshot`/`ChangeSnapshotBuilder`/`SnapshotRepository`/`review_policy.requires_review()`/`ReviewService`/`ReviewReport`，共 26 个测试）。
 
 > 注意：`pytest` 需要在装了 `anthropic`/`python-dotenv` 的同一个环境（`.venv`）里跑，否则涉及 Anthropic Provider 的测试会因为 `ModuleNotFoundError: No module named 'anthropic'` 而无法 collect。
 
@@ -496,6 +517,276 @@ cp .env.example .env
 
 `read_file` → `patch_file` → `run_test` 串成一个完整的"自主修复循环"也做过真实 API 验收（`tasks/task-run-test-loop` 的 run-001）：`sandbox/calculator.py` 里故意写错了 `add()`（`return a - b`），`sandbox/test_calculator.py` 断言 `add(2, 3) == 5` 因此失败；任务描述只说"有个测试失败了，修好它"，**没有告诉模型答案**。真实调用序列是 `read_file`（先后读了 `calculator.py` 和 `test_calculator.py`）→ `patch_file`（`old_text`/`new_text` 各是完整的两行函数体）→ `run_test(test_name="unit")`，`ToolResult.metadata` 里 `exit_code: 0`，随后模型才给出最终总结。这次只用了一轮 `patch_file` 就修对了，所以没有观察到"改错了、`run_test` 报失败、再改一次"这种真正的重试路径——如果要验证重试路径，需要设计一个模型第一次大概率会改错的任务，目前还没有这样的案例。
 
+## 任务编排与人工审批：Manager Agent → TaskPlan → 调度执行（5D）
+
+在"一个 Run 执行一次工具调用循环"之上，还有一层更高的编排：一个 Task 先被拆成一份 `TaskPlan`（多个带依赖关系的 `TaskStep`，每步指定由哪个 Agent 执行），经过校验、人工审批，才会真正进入调度执行，每一步还可能失败重试。这条链路目前**只处理"分给谁做、按什么顺序做、失败了要不要再试一次"，还不负责真的把每个 `TaskStep` 变成一次 LLM 工具调用 Run**——那是 `TaskPlanExecutor`/`AgentRuntimeFactory` 这一层的事，编排层只依赖它暴露的 `execute_step(step, task_id) -> str`（失败就 raise）这个窄接口。
+
+```text
+用户请求
+   │
+   ▼
+ManagerAgent.plan()          # 委托给一个 Planner（RuleBasedPlanner / 未来的 ClaudePlanner）
+   │
+   ▼
+TaskPlan(task_id, steps: [TaskStep(step_id, agent_id, description, depends_on)])
+   │
+   ▼
+PlanValidator.validate()     # UNKNOWN_AGENT / AGENT_NOT_IN_TASK / MISSING_DEPENDENCY / DEPENDENCY_CYCLE
+   │
+   ▼
+PlanReviewService.create_review()   # 确定性文本摘要，不是模型生成
+   │
+   ▼
+人工：approve-plan / reject-plan
+   │
+   ▼ (approved)
+ApprovedPlanExecutor.execute()      # 唯一同时认识 Planning 层和 TaskScheduler 的桥
+   │
+   ▼
+TaskDependencyResolver.resolve()    # TaskPlan -> 若干"轮"（wave），同轮内的 step 互不依赖
+   │
+   ▼
+TaskScheduler.run()                 # 逐轮执行：轮内用线程池并行，轮间串行
+   │       每个 step 经 RetryManager 按 RetryPolicy 重试；
+   │       依赖没成功的 step 直接标 SKIPPED，不会被派发
+   ▼
+list[StepExecutionResult]           # SUCCESS / FAILED / SKIPPED，FAILED 带分类后的 ExecutionFailure
+```
+
+- **Agent 发现与消息投递**：`AgentRegistry`（`src/agent_registry.py`）只是 `AgentRepository` 之上一层薄封装，回答"平台里有哪些 Agent"；`MessageRouter`（`src/message_router.py`）回答"这条消息现在能不能送到某个 Agent 手上"——`send()` 会先查 `TaskAgentRegistry.list_agents(message.task_id)`，确认 `receiver_id` 确实是**这个 Task 当前指派**的 Agent（不是"平台里存在"就够），再去分发；哪怕路由器内部还持有某个 Agent 的 handler 实例，只要 `TaskAgentRegistry` 说它已经不再属于这个 Task，也会被 `AgentNotAssignedToTaskError` 拒绝——这是防止"陈旧 handler 被当成授权凭证"的第二道执行期防线（第一道是下文 Task-Scoped Agent 架构里 `AgentRuntimeFactory` 本身只构建当前 Task 指派的 handler）。
+- **TaskPlan 模型**（`src/task_plan.py`）：`TaskStep(step_id, agent_id, description, depends_on: list[str])` + `TaskPlan(task_id, steps)`，纯 dataclass，`depends_on` 默认空列表。
+- **依赖解析**：`TaskDependencyResolver.resolve()`（`src/task_dependency_resolver.py`）把 `depends_on` 图拓扑排序成"轮"（`list[list[TaskStep]]`）——每一轮内的 step 互不依赖，是并行调度的最小单位；图里有环则抛 `CyclicDependencyError`。
+- **调度与重试**：`TaskScheduler.run(plan)`（`src/task_scheduler.py`）逐轮执行，轮内用 `ThreadPoolExecutor` 并行派发、轮间串行（后一轮可能依赖前一轮的结果）；某个 step 的依赖没有成功（`FAILED`/`SKIPPED` 都算），这个 step 直接记 `SKIPPED`，根本不会被派发，且这个"没成功"会向下游传递。真正执行一次尝试交给 `RetryManager.execute()`（`src/retry_manager.py`），按注入的 `RetryPolicy`（`src/retry_policy.py`，目前只有一个字段 `max_attempts`，默认 1）重试；每次真实抛出的异常先经 `FailureClassifier.classify()`（`src/failure_classifier.py`）分类成 `ExecutionFailure`（`TEMPORARY_ERROR`/`PLAN_ERROR`/`BLOCKED`/`FATAL`），再由 `FailureRetryClassifier`（`src/failure_retry_classifier.py`）判断这一类失败值不值得重试（目前只有 `TEMPORARY_ERROR` 会重试）——"重试几次"（`RetryPolicy`）和"这次失败值不值得重试"（`FailureRetryClassifier`）是两个独立问题，谁都不覆盖谁。
+- **从请求到计划**：`Planner`（`src/planning/planner.py`）是一个结构化 `Protocol`：`create_plan(request, task_id, context: TaskPlanningContext | None) -> TaskPlan`。默认实现 `RuleBasedPlanner`（`src/planning/rule_based_planner.py`）纯关键词匹配（"研究"+"实现"之类的组合触发不同形状的计划），不做真正的语言理解，只是用来证明 Planner 这层接口能产出带依赖关系的多步计划；它完全忽略传入的 `context`。
+- **计划校验**：`PlanValidator.validate(plan)`（`src/planning/plan_validator.py`）在计划真正被调度前挡一道：`UNKNOWN_AGENT`（`agent_id` 在 `AgentRegistry` 里根本不存在）、`AGENT_NOT_IN_TASK`（Agent 是真的，但没有指派给这个 Task——两种错误分开报，是为了让后面的自动修复知道具体错在哪一类）、`MISSING_DEPENDENCY`（`depends_on` 指向不存在的 `step_id`）、`DEPENDENCY_CYCLE`。只产出 `PlanValidationResult`（`errors: list[ValidationError]`，每条错误目前都标 `repairable=True`），不自己拒绝或修复计划——校验结果交给下一层决定怎么处理。
+- **人工审批闭环**：`PlanReviewService.create_review(plan)`（`src/planning/plan_review_service.py`）跑一遍校验，把 `TaskPlan` + `PlanValidationResult` 拼成一份**确定性字符串摘要**（不是模型生成——这是人工审批的安全边界，摘要必须能从计划本身精确复现，不能每次调用结果都不一样）。`PlanApprovalService.approve()/reject()`（`src/planning/plan_approval_service.py`）故意不检查 `validation.valid`——校验没通过的计划人也可以硬批，因为决定权在人，不在校验器。`PersistentApprovalService`（`src/planning/persistent_approval_service.py`）在这之上加一层磁盘持久化（`ApprovalRecord`），使得"计划创建"和"人工批准"可以发生在完全不同的进程/不同的时间点，中间不需要任何进程常驻。
+- **CLI**：
+
+  ```bash
+  # 为一个 Task 生成一份待批准的 TaskPlan（只生成，不执行）
+  python -m src.main plan <task-id> "<用自然语言描述这次要做的工作>"
+
+  # 列出所有待审批的计划
+  python -m src.main plans
+
+  # 批准并立即执行（成功后如果整份计划都成功，会触发 Task 完成收尾，见下文 5E-4）
+  python -m src.main approve-plan <task-id>
+
+  # 拒绝，不执行
+  python -m src.main reject-plan <task-id>
+  ```
+
+  `approve-plan` 背后是 `PlanExecutionService`（`src/planning/plan_execution_service.py`）——它刻意每次 `execute()` 都重新从磁盘加载 `PlanRecord`/`ApprovalRecord`，重新构建一整条 `MessageRouter`/`TaskPlanExecutor`/`TaskScheduler`/`ApprovedPlanExecutor` 调用链，而不是复用某个常驻实例：`plan` 命令和 `approve-plan` 命令可以是两次完全独立的进程调用（甚至不同天），中间唯一传递的状态就是 `task_id` 对应的磁盘文件。执行结果被聚合成 `PlanExecutionResult`（整份计划是否全部成功），供后续判断 Task 是否可以标记完成。
+- **持久化**：`tasks/<task-id>/plan.json`（`PlanRecord`：`task_id`/`plan`/`created_at`/`status` — `pending`/`approved`/`rejected`/`executed`）、`tasks/<task-id>/approval.json`（`ApprovalRecord`：审批决定，和下文运行时审批用的 `runtime_approval.json` 是两个不同的文件，互不覆盖）。
+
+## History Compression（历史压缩，5D-6B-4）
+
+`LLMRunExecutor`（`src/llm_executor.py`）的多轮工具调用循环每一轮都要把完整对话历史重发给 provider——历史越滚越大，每轮成本随之增长。History Compression 是这个循环内置的一层：每轮 provider 调用前，把完整历史（durable，永不截断）压缩成一份更短的"本轮实际发送视图"，同时保留完整历史供后续轮次继续使用。
+
+### 架构
+
+```
+LLMMessage[]  (durable，只增不减)
+      │
+      ▼
+MessageGroupBuilder          # src/context/history/message_group_builder.py
+      │  把消息切成 INITIAL_TASK / TOOL_EXCHANGE / NORMAL 三类 MessageGroup
+      │  （assistant tool_use + 紧跟的 user tool_result 配对成一个原子单元）
+      ▼
+list[MessageGroup]
+      │
+      ▼
+GroupSelector                # src/context/history/group_selector.py
+      │  四段优先级选择，每段都是「从新到旧扫描、不 break、只 continue」：
+      │    1) group 0（INITIAL_TASK）——无条件保留，预算再小也不例外
+      │    2) PROTECTED 工具交换（apply_patch/write_file/create_file/
+      │       delete_file/git_commit）——状态改变类操作优先抢预算
+      │    3) 其余非 EVICTABLE 的（NORMAL + 未知工具）——按新旧顺序抢剩余预算
+      │    4) EVICTABLE 工具交换（read_file/list_files/search）——最后才轮到
+      │  依赖 HistorySizeEstimator（可替换的 token 估算）+
+      │       ToolRetentionPolicy（tool_name → PROTECTED/NORMAL/EVICTABLE）
+      ▼
+GroupSelectionResult(retained_positions)
+      │
+      ▼
+RuleBasedHistoryCompactor    # src/context/history/rule_based_history_compactor.py
+      │  把 group position 展平回 message index
+      ▼
+CompactionPlan(original_count, retained_indices)
+      │
+      ▼
+apply_compaction_plan()      # src/context/history/apply_compaction_plan.py
+      │  messages[i] for i in retained_indices —— 纯函数，不修改/不复制原 history
+      ▼
+本轮 LLMRequest.messages（发给 provider 的，只是一个视图）
+```
+
+并行的可解释性支路（不影响上面的决策，只是复述）：
+
+```
+messages + groups + retained_positions
+      │
+      ▼
+CompactionReportBuilder      # src/context/history/compaction_report_builder.py
+      │  重新跑一遍 ToolRetentionPolicy 分类，标注每个 group 的保留/删除原因
+      │  （initial_task / protected_tool / recent_context / budget_limit）
+      ▼
+CompactionReport  →  events.jsonl 的 "compaction_report" 事件（每轮一条）
+```
+
+`LLMRunExecutor` 还会发 `context_usage` 事件（`src/context/context_usage_builder.py`），拆出 `system_prompt_tokens`/`tool_definition_tokens`/`initial_message_tokens`/`history_before_tokens`/`history_after_tokens`/`total_sent_tokens`，可以直接从 `events.jsonl` 里看出某一轮的 token 大头在哪。
+
+### 不变量（都有对应测试，见 `tests/context/history/`）
+
+- **原子性**：一个 `TOOL_EXCHANGE` group（`tool_use` + `tool_result`）永远整体保留或整体删除，绝不拆开半个——`GroupSelector`/`RuleBasedHistoryCompactor` 从不按 message index 操作，只按 group position 操作。
+- **initial task 强制保留**：无论预算多小（甚至 0），group 0 永远在保留集合里；预算不够时其余内容会被砍到只剩它。
+- **未知工具默认安全**：`ToolRetentionPolicy.classify()` 对没见过的 tool_name（包括孤立 tool_use/tool_result 导致 `tool_name=None` 的情况）返回 `NORMAL`，不会被当成可随意丢弃的 `EVICTABLE`——防止新工具被静默清理。
+- **不修改原始历史**：`HistoryCompactor.compact()`/`apply_compaction_plan()` 全程只读，`LLMRunExecutor` 里累积增长的 `messages` 列表永远不会被压缩后的视图覆盖（不会出现 `messages = request_messages` 这种写法）。
+- **确定性**：同样的 `messages`/`budget` 输入，`compact()` 多次调用结果完全一致。
+- **协议合法性**：即使 `GroupSelector` 的"不 break、只 continue"策略会让保留结果出现不连续的间隔（新算法相对 4B-2 版本的行为变化），重建后发给 provider 的消息序列依然满足 Anthropic 协议——每个保留的 `tool_result` 前面紧跟着 id 匹配的 `tool_use`，历史结尾不会有悬空的未回应 `tool_use`（`test_retained_messages_still_form_a_valid_tool_protocol_sequence`）。
+
+### Benchmark（`benchmarks/history/run_history_benchmark.py`，本地确定性脚本，不打真实 API）
+
+用合成但真实感的 80 轮长历史（每 5 轮一次 `apply_patch`，其余多数是 `read_file`，穿插纯文本轮次），分别用极大预算（等效禁用压缩）和 8000 token 预算（启用压缩）跑同一套真实压缩管线：
+
+```json
+{
+  "task": "retention_test",
+  "rounds": 80,
+  "without_compaction": {"input_tokens": 1346682},
+  "with_compaction": {"input_tokens": 547226},
+  "compression_ratio": 0.5936,
+  "broken_tool_pairs": 0
+}
+```
+
+**压缩比 59.36%，0 个 broken tool pair。** 运行：`python -m benchmarks.history.run_history_benchmark`。
+
+第一版基准（30 轮）压缩比只测出 14.3%——排查后发现是场景设计问题：预算 8000 tokens 时前 18 轮左右历史压根没超预算，压缩根本没被触发，这些"无事可做"的轮次拉低了整体平均值。这本身也是个有用的结论：**History Compression 的收益只在长会话的"稳态期"才体现，短会话不需要它，也不会被它拖慢。**
+
+### ⚠️ Known limitation：它只管历史，不管固定成本
+
+> **History Compression handles dynamic history growth. It does not reduce mandatory static context cost.**
+
+`GroupSelector` 的四段优先级选择，动的是 `TOOL_EXCHANGE`/`NORMAL` 这些**会随轮次增长**的 group。但 group 0（`INITIAL_TASK`）**无条件保留**——它不是一条普通消息，而是 `LLMAgentRunExecutor._build_request()` 拼出来的、内嵌了 `RunContextBuilder.project_snapshot`（静态项目上下文快照）的那条消息。这部分成本：
+
+- **每一轮都原样重发**，跟历史压缩得多干净完全无关；
+- 在两次真实 smoke test 中实测占了单轮 token 的大头（"implement a login feature" 任务约 9,431 估算 tokens / 单轮 22,043 真实 tokens；"validation feature" 任务约 31,592 估算 tokens / 单轮 48,669 真实 tokens）；
+- 两次真实 run 里，`compaction_report` 事件的 `removed_count` **全程为 0**——history 还没来得及长到超预算，run 就先被 `max_total_tokens`（跨轮累加的 100k 硬顶）打断了。
+
+**所以如果之后有人问"为什么已经有 History Compactor 了，Run 还是报 `Maximum total token limit exceeded`？"——答案就在这里**：这个组件解决的是"对话历史膨胀"问题，不是"静态上下文过大"问题，两者是独立的成本来源。真正压低单轮底线成本需要回到 `RunContextBuilder`/`ContextSelector`/`ContextTrimmer`（`src/context_builder.py` + `src/context/`）那一侧做 Static Context Optimization——这部分现已实现，见下一节。
+
+## Static Context Optimization：ContextSelector / ContextTrimmer
+
+History Compression 只解决"对话历史越滚越大"，不解决"第一轮发的静态项目快照本身就很大"。这部分现在由 `src/context/`（不含 `history/` 子目录，那是上一节的东西）实现，并已经接入 `RunContextBuilder`（`src/context_builder.py`），取代了原来硬编码的固定 5 个文件。
+
+- `ContextSelector`（Protocol）/`RuleBasedContextSelector`：不做语义理解，用关键词重叠打分——从任务描述里抽出长度 ≥3 的词，遍历仓库文件（用 `path_exclusions.is_excluded()` 过滤 `.git`/`.venv`/`__pycache__`/`.env` 等噪音路径），按文件名词干与关键词的双向子串包含关系匹配。一个词都匹配不上时，回退到 `FALLBACK_FILES = ("src/main.py", "README.md")`——刻意不是旧硬编码列表的那 5 个文件。
+- `ContextBudget`（`context_budget.py`）：只有 `max_tokens` 一个字段，是"单次请求的静态上下文预算"，和 `llm_executor.py` 里跨轮累加的 `max_total_tokens` 是两个不同维度的限制。
+- `ContextTrimmer`（Protocol）/`RuleBasedContextTrimmer`：预算不够时，按 `ContextSelector`给出的顺序从后往前丢整个文件（文件级别裁剪，不做文件内部截断——`ContextFile` 目前还没有内容/token 计数字段）。
+- `ContextSizeEstimator`（Protocol）/`RuleBasedContextSizeEstimator`：`len(text) // 4` 的字符数量级估算，不是真正的 tokenizer，而且**只估算快照的元数据**（文件路径、选中理由、项目目录树），不读文件内容——所以裁剪现在是"按文件数量"裁剪，不是真正按 token 精确截断到预算线以内；一份指向几个巨大文件的快照，估算出来的 token 数可能小得离谱。这是已知的下一步改进点。
+- `ContextFile`/`ContextSnapshot`（`context_file.py`/`context_snapshot.py`）：纯数据，`ContextSnapshot` = `files: list[ContextFile]` + `project_tree: str`。
+
+这一层解决的是内存记录里长期标记为"已定位根因、未修复"的缺口（no ContextSelector，硬编码 5 个不相关文件）——现在已经修复并接入生产路径，测试见 `tests/context/`（`test_rule_based_context_selector.py`/`test_rule_based_context_trimmer.py`/`test_context_budget.py`/`test_context_builder_integration.py`）。剩余已知限制见文末。
+
+## Task-Scoped Agent 架构（5E-4）
+
+早期设计隐含"Agent 是全局池子，谁都能用"的假设；这一版把"可复用的 Agent 资产"和"这个 Agent 当前属于哪个 Task"拆成两个不同生命周期的概念，冻结在 `docs/architecture/agent_lifecycle_policy.md`，并有 `tests/architecture/test_agent_lifecycle_policy.py` 锁定不变量：
+
+| 概念 | 类 | 生命周期范围 |
+|---|---|---|
+| `AgentTemplate` | `src/agents/agent_template.py` | 全局、持久、用户创建 |
+| `AgentDefinition` | `src/models.py`（已有） | 全局、持久，可被多个 Task 先后复用 |
+| `TaskAgent` | `src/agents/task_agent.py` | 单个 Task 内，临时的"成员关系"记录 |
+| Runtime Handler（`LLMAgentHandler`） | `src/agent_handlers/llm_agent_handler.py` | 单次执行调用，从不缓存 |
+
+四条锁定的不变量：①`TaskAgent.agent_id == AgentDefinition.id`；②`TaskAgent.template_id == AgentDefinition.template_id`（由 `TaskAgentAssignmentService` 强制，不匹配抛 `AgentTemplateMismatchError`）；③清理隔离——`TaskAgentCleanupService.cleanup(task_id)` 绝不触碰其它 Task 的 `TaskAgent` 记录，也不碰 `AgentDefinition`/`AgentTemplate` 本身；④执行隔离——一个 Runtime Handler 绝不会活得比构建它的那次 `create_handlers(task_id)` 调用更久。
+
+- `TaskAgentRegistry`（`task_agent_registry.py`）：`assign_agent`/`list_agents(task_id)`/`get_agent`/`owner_task_id(agent_id)`/`remove_task_agents(task_id)`，以 `task_id` 为第一层 key，结构上就不可能发生跨 Task 泄漏。
+- `TaskAgentTeamState`（`OPEN → LOCKED → RELEASED`，不可逆）与 `TaskAgentTeamLifecycle`：每个 Task 一份状态机；未指派任何 Agent 的 Task 默认 `OPEN`。`PlanService.create_plan()` 会在读取 `TaskPlanningContext` **之前**先 `lock()`，避免"读取团队成员"和"锁定团队"之间出现指派窗口期。
+- `TaskAgentAssignmentService.assign(task_id, agent_id, template_id)` 是创建 `TaskAgent` 记录的**唯一合法入口**：检查 Task 存在、团队状态是 `OPEN`、Agent 存在、`template_id` 匹配、这个 Agent 没有被其它 Task 占用（否则抛 `AgentAlreadyAssignedToTaskError`/`AgentAlreadyAssignedElsewhereError`/`TaskAgentTeamLockedError`/`TaskAgentTeamReleasedError`）。
+- `TaskAgentCleanupService.cleanup(task_id)`：只有当 `task.status == "completed"`（重新独立检查，不信任调用方传入的状态）才会触发，调用 `team_lifecycle.release()`（`LOCKED → RELEASED`）并清掉这个 Task 的 `TaskAgent` 记录；`AgentDefinition`/`AgentTemplate` 完好保留，可以被指派给下一个 Task。
+- `TaskAgentInfo`（`task_agent_info.py`）：给 Planner 看的窄视图（`agent_id`/`role`/`description`/`capabilities`），刻意不包含 `task_id`/状态/`template_id`。
+
+完整生命周期：用户创建 `AgentTemplate` → 创建引用它的 `AgentDefinition` → `TaskAgentAssignmentService.assign()` 生成 `TaskAgent`（团队保持 `OPEN`）→ `PlanService.create_plan()` 锁定团队（`LOCKED`）→ 执行阶段所有 handler 都通过 `AgentRuntimeFactory.create_handlers(task_id)` 现建、Task 范围隔离、绝不缓存 → Task 完成后 `TaskAgentCleanupService.cleanup()` 释放团队并清空该 Task 的 `TaskAgent` 记录，`AgentDefinition`/`AgentTemplate` 本身可以被重新指派给一个全新的 Task。`MessageRouter.send()`（见上一节）是这套结构的第二道执行期防线。
+
+测试覆盖：`tests/agents/`（每个类一份单测）、`tests/integration/test_agent_lifecycle_regression.py`（Template → Definition → Task → Assignment → Lock → Execute → Complete/Fail → Cleanup 全链路，用真实 `AgentRegistry`/`AgentRepository`，会真的写 `agent.json`）、`test_task_agent_assignment_flow.py`、`test_agent_definition_reuse_lifecycle.py`、`test_cross_task_execution_isolation.py`。
+
+## Claude 结构化规划与计划自修复（5E-1 ~ 5E-3）
+
+`RuleBasedPlanner` 只是关键词分支，`ClaudePlanner`（`src/planning/claude_planner.py`）是真正调用模型生成结构化计划的实现，满足同一个 `Planner` Protocol，理论上可以直接替换：
+
+```text
+ClaudePlanner.create_plan(request, task_id, context: TaskPlanningContext)
+   │
+   ▼
+PlannerPromptBuilder.build()     # 纯字符串拼接（不是模板引擎）：
+   │                             #   请求 + TaskPlanningContext 的 Agent 描述段
+   │                             #   （与下面的 Repair 共用同一个 build_agent_prompt_section）+ 约束
+   ▼
+PlannerProvider.complete(prompt) -> str   # 极简 Protocol，只有一个方法，
+   │                                       # 故意不是完整的 LLMProvider/LLMRequest 契约
+   ▼
+PlannerResponseParser.parse(raw)  # json.loads，格式不对/字段缺失直接抛，不做宽容降级
+   │
+   ▼
+PlannerOutput(steps: list[PlannedStep])
+   │
+   ▼
+TaskPlan（ClaudePlanner 自己转换，不做校验——校验仍然是 PlanValidator 的职责）
+```
+
+`PlanningContext`（`planning_context.py`，`available_agents: list[str]` + `constraints`）是更早、更简单的旧形状；`TaskPlanningContext`（`task_planning_context.py`）是 Task-Scoped Agent 架构下的替代品：`available_agents: list[TaskAgentInfo]`（不是裸 id）+ `task_id` + 可选的项目 `ContextSnapshot`。由 `TaskPlanningContextFactory.create(task_id)` 构建，联结 `TaskAgentRegistry.list_agents(task_id)` 和 `AgentTemplateRepository`；如果某个 `TaskAgent` 的 `template_id` 解析不到对应模板，视为数据损坏直接抛 `AgentTemplateNotFoundError`，不会静默降级。
+
+**当前状态**：`ClaudePlanner` 已经完整实现并有单测（`tests/planning/test_claude_planner.py`）和用 `FakeProvider` 跑通的集成测试（`test_claude_planner_integration.py`），但 `ManagerAgent.__init__` 里默认仍然是 `self._planner = planner or RuleBasedPlanner()`——**还没有任何生产代码路径把 `ClaudePlanner` 接成默认 Planner**，要用必须显式注入。
+
+**计划自修复循环**（`PlanRepairLoop.run()`，`src/planning/plan_repair_loop.py`）：`Planner.create_plan()` 生成计划 → `PlanValidator` 校验；不通过就进入最多 `max_attempts`（默认 3）次的修复循环——`RepairDecisionService.decide(validation)` 先判断值不值得修（`validation.repairable`），值得的话 `RepairRequestBuilder` 组一个 `PlanRepairRequest`（`source=VALIDATION`），交给 `RepairPlanner.repair()`（复用同一个 `build_agent_prompt_section` + `PlannerResponseParser`，`RepairPromptBuilder` 会按来源写不同的开场白）重新生成计划，再校验一轮；超过 `max_attempts` 或校验器说不可修，抛 `PlanRepairLimitExceeded`。
+
+有两条不同的入口能触发修复：`RepairRequestBuilder`（计划**校验时**发现的问题）和 `FailureRepairRequestBuilder`（`failure_repair_request_builder.py`，把一次**执行期**的 `ExecutionFailure` 转成 `source=EXECUTION_FAILURE` 的修复请求）——后者是下一节"执行恢复"里 `RecoveryExecutor` 触发 `REPAIR_PLAN` 时的入口。`RuntimePlanRepairService`（`runtime_plan_repair_service.py`）是刻意做薄的适配层：让 Recovery 这一层完全不需要 import `RepairPlanner`（Planning 层的概念），不做 `TaskPlan` 转换、不改状态、不重新校验。整个修复循环里，`context` 只在最外层解析一次，之后每次重试都原样复用，不会中途重新解析——保证 Claude 在多次重试之间看到的 Agent 边界不会漂移。
+
+## 执行恢复与重规划（5E-5，尚未接入 CLI）
+
+如果调度中某个 `TaskStep` 失败了，不该总是"整个计划就地失败"——`TEMPORARY_ERROR` 可能重试就好，`PLAN_ERROR` 需要重新规划，`BLOCKED`（比如权限不足）需要人来决定，真正的 `FATAL` 才应该放弃。这一整条"失败之后该怎么办"的决策链已经实现并有集成测试覆盖，但**还没有接入任何 CLI 命令**——目前只能被其它代码/测试直接调用。
+
+```text
+TaskStep 执行抛出异常
+   │
+   ▼
+FailureClassifier.classify(exc, step_id)      # src/failure_classifier.py
+   │  固定的 Exception → FailureCategory 映射：
+   │  TimeoutError/ConnectionError → TEMPORARY_ERROR
+   │  PermissionError → BLOCKED
+   │  其它一律 → FATAL（未知异常默认最保守，不是默认宽容）
+   ▼
+ExecutionFailure(category, message, step_id)
+   │
+   ▼
+RecoveryPlanner.decide(failure)                # src/recovery_planner.py
+   │  TEMPORARY_ERROR → RETRY
+   │  PLAN_ERROR      → REPAIR_PLAN
+   │  BLOCKED         → REQUEST_APPROVAL
+   │  FATAL           → ABORT
+   │  （出现没覆盖到的分类会直接抛 ValueError，而不是静默兜底——
+   │   把"分类没覆盖全"当成代码 bug，不是运行时可以吞掉的情况）
+   ▼
+RecoveryOrchestrator.plan(PlanExecutionResult)  # 给每个失败的 step 配一个 RecoveryAction，
+   │                                             # 纯决策，不执行
+   ▼
+RecoveryPlan(list[RecoveryStepAction])
+   │
+   ▼
+RecoveryExecutor.execute(plan, RecoveryExecutionContext)
+   ├── RETRY            → 真的调 RetryManager.execute() 重跑这一步
+   ├── REPAIR_PLAN       → FailureRepairRequestBuilder + RuntimePlanRepairService（见上一节）
+   ├── REQUEST_APPROVAL  → RuntimeApprovalService.create()，执行停在这里等人
+   └── ABORT             → 目前直接跳过，终止逻辑还没接（已知缺口）
+```
+
+- **运行时审批闸门**（`src/runtime_approval_*.py`）：`RuntimeApprovalRequest`（`approval_id`/`task_id`/`plan_id`/`failure`/`status="pending"`）持久化在 `tasks/<task-id>/runtime_approval.json`——**和上一节 `plan` 审批用的 `approval.json` 是两个不同的文件**，刻意分开避免互相覆盖。`RuntimeApprovalService.create()/approve()/reject()` 只接受从 `pending` 出发的状态转换，否则抛 `RuntimeApprovalStateError`，防止悄悄覆盖人已经做过的决定。**它和 README 前面"人工审核：`ChangeSnapshot` 与 `review` 命令"是两套不同的闸门**：`review` 是 Run 级、事后的——一次 Run 已经成功跑完、改了文件，之后人来决定要不要认；这个新的运行时审批是 Task/计划执行**过程中**的——某一步失败并且被分类成 `BLOCKED`，执行当场卡住，后续步骤在人做出决定前完全不会被派发。
+- **检查点与恢复继续**：`ExecutionCheckpoint`（`src/execution_checkpoint.py`：`task_id`/`plan_id`/`completed_step_ids`/`step_results`/`blocked_step_id`）由 `ExecutionCheckpointRepository` 存到 `tasks/<task-id>/checkpoint.json`。**已知缺口**：目前没有 `CheckpointWriter`——没有任何生产代码会在一次 `PlanExecutionResult` 产生后自动把它写成 `ExecutionCheckpoint`；集成测试（`test_recovery_approval_flow.py`）是手工构造检查点来验证恢复路径本身是真实可用的。人工批准后，`RecoveryContinuationService.resume_after_approval()`（`src/recovery_continuation_service.py`）确认 `RuntimeApprovalRequest.status == "approved"`（pending/rejected 都拒绝并抛 `RecoveryContinuationError`），交给 `TaskPlanResumeService.resume()`（`src/planning/task_plan_resume_service.py`）——它加载检查点、用 `ResumePlanBuilder.build(plan, checkpoint)` 剔除已完成的 step **并且改写剩余 step 的 `depends_on`，去掉指向已完成 step 的引用**（否则 `TaskDependencyResolver` 会把一次正常的"接着跑"误判成依赖悬空/成环），再把这份缩小后的计划交给**完全不知道自己在做"恢复"**的、原封不动的 `TaskScheduler` 去跑。
+- **Task 完成收尾**：`TaskCompletionService.complete_if_successful(task_id, result: PlanExecutionResult)`（`src/planning/task_completion_service.py`）——只有 `result.succeeded` 才会把 Task 状态从 `in_progress` 推进到 `completed`（已经是 `completed` 时是幂等 no-op；状态不是 `in_progress` 时抛 `TaskCompletionStateError`）。这是目前 CLI 里唯一真正在用的收尾入口——`approve-plan` 执行完计划后会调它，成功就顺带触发上一节的 `TaskAgentCleanupService.cleanup()`。
+
+**测试**：`tests/integration/test_recovery_approval_flow.py`（真实 `PermissionError` → `BLOCKED` → `RecoveryOrchestrator`/`RecoveryExecutor`/`RuntimeApprovalService` 全链路，验证 pending/rejected 时恢复会被拒绝、跨 Task 审批互不干扰、同一个 `RecoveryPlan` 里混合 RETRY/REPAIR_PLAN/REQUEST_APPROVAL 互不干扰，全部走真实 `TaskScheduler`）、`tests/test_recovery_*.py`、`tests/test_retry_manager.py`、`tests/test_failure_classifier.py`、`tests/test_execution_checkpoint*.py`、`tests/test_runtime_approval_*.py`。
+
 ## 一个独立的、更早期的原型：容器化 Agent Runtime
 
 `runtime/`（`Dockerfile` + `agent.sh`）和 `scripts/`（`run-agent.sh`/`stop-agent.sh`/`status-agent.sh`/`logs-agent.sh`/`remove-agent.sh`）是这个项目更早期的一版思路留下的：把每个 Agent 跑成一个独立的 Docker 容器，通过 shell 脚本管理容器生命周期。目前 `agent.sh` 里的"执行任务"部分只是 `sleep 5` 加写一个占位输出文件，**还没有和上面 `src/` 里的 Task/Run/Agent 主链路打通**。这部分可以理解为容器化隔离运行时的技术验证草稿，如果要用起来还需要单独规划。
@@ -512,3 +803,9 @@ cp .env.example .env
 - `review` 命令目前没有 Reviewer Agent：`ReviewReport.summary`/`risks` 恒为 `None`/`[]`，diff 内容也从不生成（`ChangeSnapshot.diff_path` 目前恒为 `null`，因为没有代码会写 `diff.patch`）——审核时只能看 `changed_files`/`mutation_count`/`test_results`，看不到具体改了什么行。approve/reject 也只是把 `run.json.status` 改成 `approved`/`rejected`，不会自动 `git commit`。
 - 容器化 Agent Runtime（`runtime/` + `scripts/`）与主执行链路是两套独立的东西，尚未整合。
 - 只支持 Anthropic 一家 provider；`LLMProvider` 协议本身是 provider 无关的，理论上可以扩展。
+- **History Compression（见上方专门章节）只压缩对话历史，不压缩每轮都会重发的静态上下文快照**——如果 Run 报 `Maximum total token limit exceeded` 但 `events.jsonl` 里 `compaction_report` 的 `removed_count` 一直是 0，问题大概率在 `RunContextBuilder` 选出来的 `initial_message` 太大，不在压缩算法本身；两次真实 smoke test 都是这个原因触发的失败，不是压缩逻辑的 bug。
+- `RuleBasedContextSizeEstimator`（见"Static Context Optimization"一节）只估算 `ContextSnapshot` 的元数据（路径/理由/项目目录树），不读文件内容，所以静态上下文的裁剪是"按文件数量丢文件"，不是按真实 token 数精确截断到预算线以内。
+- `ClaudePlanner`（见"Claude 结构化规划"一节）已经实现、测试齐全，但 `ManagerAgent` 默认仍然是 `RuleBasedPlanner`——没有任何生产路径会自动用上 Claude 规划，必须调用方显式注入。
+- 执行恢复层（见"执行恢复与重规划"一节）**完全没有接入 CLI**，只能通过直接调用 `RecoveryOrchestrator`/`RecoveryExecutor` 使用；`RecoveryAction.ABORT` 目前是静默跳过，没有真正的终止逻辑；也没有 `CheckpointWriter`——没有任何生产代码会在计划执行后自动生成 `ExecutionCheckpoint`，恢复路径本身可用，但触发恢复所需的检查点目前只能手工构造。
+- Task-Scoped Agent 架构里的 `AgentTemplateRepository`（`src/agents/agent_template_repository.py`）目前是纯内存实现，没有持久化到磁盘，进程重启就丢。
+- 运行时审批（`runtime_approval.json`）和计划审批（`approval.json`）是两个独立文件、两套独立状态机，都还没有对应的 CLI 命令去查看/审批"运行时审批"——只有计划审批（`plans`/`approve-plan`/`reject-plan`）接了 CLI。

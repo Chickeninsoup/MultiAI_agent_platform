@@ -1,0 +1,2 @@
+class RecoveryContinuationError(ValueError):
+    pass

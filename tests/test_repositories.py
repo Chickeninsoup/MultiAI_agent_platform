@@ -24,6 +24,7 @@ def _write_agent(
                 "owner": "owner-1",
                 "status": "ready",
                 "role": role,
+                "template_id": role,
                 "default_model": "claude-model-placeholder",
                 "credential_id": "cred-1",
                 "system_prompt_path": "system-prompt.md",

@@ -1,0 +1,2 @@
+class RuntimeApprovalStateError(ValueError):
+    pass

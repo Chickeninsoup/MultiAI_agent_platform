@@ -1,0 +1,12 @@
+{
+  "task": "retention_test",
+  "rounds": 80,
+  "without_compaction": {
+    "input_tokens": 1346682
+  },
+  "with_compaction": {
+    "input_tokens": 547226
+  },
+  "compression_ratio": 0.5936,
+  "broken_tool_pairs": 0
+}

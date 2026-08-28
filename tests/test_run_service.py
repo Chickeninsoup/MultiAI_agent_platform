@@ -55,6 +55,7 @@ def _setup_fixture(
             "owner": "owner-1",
             "status": "ready",
             "role": "engineer",
+            "template_id": "engineer",
             "default_model": "claude-model-placeholder",
             "credential_id": "cred-1",
             "system_prompt_path": "system-prompt.md",

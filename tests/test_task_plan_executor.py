@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 from src.agent_message import AgentMessage
+from src.agents.task_agent import TaskAgent
+from src.agents.task_agent_registry import TaskAgentRegistry
 from src.message_router import MessageRouter
 from src.task_plan import TaskPlan, TaskStep
 from src.task_plan_converter import TaskPlanConverter
 from src.task_plan_executor import TaskPlanExecutor
+
+
+def _registry(*agent_ids: str) -> TaskAgentRegistry:
+    registry = TaskAgentRegistry()
+
+    for agent_id in agent_ids:
+        registry.assign_agent(
+            TaskAgent(
+                agent_id=agent_id, task_id="task-001", template_id="t"
+            )
+        )
+
+    return registry
 
 
 class FakeAgent:
@@ -25,7 +40,7 @@ class FakeAgent:
 def test_execute_runs_a_single_step_plan() -> None:
     coder = FakeAgent("agent-coder", "done")
     executor = TaskPlanExecutor(
-        TaskPlanConverter(), MessageRouter([coder])
+        TaskPlanConverter(), MessageRouter([coder], _registry("agent-coder"))
     )
     plan = TaskPlan(
         task_id="task-001",
@@ -48,7 +63,7 @@ def test_execute_runs_multiple_steps_in_order() -> None:
     researcher = FakeAgent("agent-researcher", "research finished")
     coder = FakeAgent("agent-coder", "coder finished")
     executor = TaskPlanExecutor(
-        TaskPlanConverter(), MessageRouter([researcher, coder])
+        TaskPlanConverter(), MessageRouter([researcher, coder], _registry("agent-researcher", "agent-coder"))
     )
     plan = TaskPlan(
         task_id="task-001",
@@ -75,7 +90,7 @@ def test_execute_runs_steps_with_depends_on_in_list_order() -> None:
     researcher = FakeAgent("agent-researcher", "research finished")
     coder = FakeAgent("agent-coder", "coder finished")
     executor = TaskPlanExecutor(
-        TaskPlanConverter(), MessageRouter([researcher, coder])
+        TaskPlanConverter(), MessageRouter([researcher, coder], _registry("agent-researcher", "agent-coder"))
     )
     plan = TaskPlan(
         task_id="task-001",
@@ -100,7 +115,7 @@ def test_execute_runs_steps_with_depends_on_in_list_order() -> None:
 
 
 def test_execute_returns_empty_list_for_empty_plan() -> None:
-    executor = TaskPlanExecutor(TaskPlanConverter(), MessageRouter([]))
+    executor = TaskPlanExecutor(TaskPlanConverter(), MessageRouter([], _registry()))
     plan = TaskPlan(task_id="task-001", steps=[])
 
     assert executor.execute(plan) == []
@@ -109,7 +124,8 @@ def test_execute_returns_empty_list_for_empty_plan() -> None:
 def test_execute_steps_runs_only_the_given_steps() -> None:
     coder = FakeAgent("agent-coder", "coder finished")
     executor = TaskPlanExecutor(
-        TaskPlanConverter(), MessageRouter([coder])
+        TaskPlanConverter(),
+        MessageRouter([coder], _registry("agent-coder")),
     )
     step = TaskStep(
         step_id="step-1",
@@ -124,6 +140,6 @@ def test_execute_steps_runs_only_the_given_steps() -> None:
 
 
 def test_execute_steps_returns_empty_list_for_empty_steps() -> None:
-    executor = TaskPlanExecutor(TaskPlanConverter(), MessageRouter([]))
+    executor = TaskPlanExecutor(TaskPlanConverter(), MessageRouter([], _registry()))
 
     assert executor.execute_steps([], "task-001") == []

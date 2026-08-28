@@ -86,3 +86,26 @@ def test_task_plan_is_frozen() -> None:
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         plan.task_id = "task-002"
+
+
+def test_task_plan_round_trips_through_dict() -> None:
+    plan = TaskPlan(
+        task_id="task-001",
+        steps=[
+            TaskStep(
+                step_id="research",
+                agent_id="agent-researcher",
+                description="find useful APIs",
+            ),
+            TaskStep(
+                step_id="coding",
+                agent_id="agent-coder",
+                description="implement API",
+                depends_on=["research"],
+            ),
+        ],
+    )
+
+    restored = TaskPlan.from_dict(plan.to_dict())
+
+    assert restored == plan

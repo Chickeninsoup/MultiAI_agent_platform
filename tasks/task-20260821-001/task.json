@@ -1,0 +1,25 @@
+{
+  "id": "task-20260821-001",
+  "title": "综合调研如何说到问题的重点",
+  "description": "调研'说到问题的重点/说到点子上'这一能力的内涵，针对不同情境（如技术沟通、管理汇报、教学讲解、危机应对等）总结出一套通用方法论，并产出一份综合调研报告。",
+  "workspace_id": "workspace-main",
+  "status": "in_progress",
+  "priority": "normal",
+  "created_by": "kevin",
+  "assigned_agents": [
+    "agent-general"
+  ],
+  "created_at": "2026-08-21T11:23:19Z",
+  "updated_at": "2026-08-21T11:23:19Z",
+  "started_at": "2026-08-21T11:23:19Z",
+  "completed_at": null,
+  "abandoned_at": null,
+  "current_run_id": "run-001",
+  "run_count": 1,
+  "completion_criteria": [],
+  "tags": [
+    "research",
+    "methodology",
+    "report"
+  ]
+}

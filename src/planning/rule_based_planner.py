@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.planning.task_planning_context import TaskPlanningContext
 from src.task_plan import TaskPlan, TaskStep
 
 
@@ -19,9 +20,20 @@ class RuleBasedPlanner:
     not exist in the AgentRegistry yet - deliberately not this
     Planner's concern. Whether a planned agent_id is real belongs to
     5D-5C Plan Validation.
+
+    Accepts (and ignores) context (5E-1B, retyped to
+    TaskPlanningContext in Phase 1C-3A) purely so the Planner
+    Protocol's extended signature doesn't break this default
+    implementation - keyword rules don't need available_agents or
+    constraints to pick a plan shape.
     """
 
-    def create_plan(self, request: str, task_id: str) -> TaskPlan:
+    def create_plan(
+        self,
+        request: str,
+        task_id: str,
+        context: TaskPlanningContext | None = None,
+    ) -> TaskPlan:
         normalized_request = request.lower()
 
         if "research" in normalized_request and (

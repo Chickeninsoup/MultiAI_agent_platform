@@ -39,8 +39,8 @@ class PlanReviewService:
             lines.append("Validation: PASSED")
         else:
             lines.append("Validation: FAILED")
-            for error in validation.errors:
-                lines.append(f"- {error}")
+            for message in validation.error_messages():
+                lines.append(f"- {message}")
 
         lines.append("")
         lines.append("Steps:")

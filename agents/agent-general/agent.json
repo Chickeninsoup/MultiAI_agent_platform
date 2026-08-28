@@ -5,6 +5,7 @@
   "owner": "kevin",
   "status": "ready",
   "role": "general",
+  "template_id": "general",
   "default_model": "claude-model-placeholder",
   "credential_id": "credential-kevin-claude",
   "system_prompt_path": "system-prompt.md",

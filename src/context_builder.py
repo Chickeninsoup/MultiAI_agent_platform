@@ -1,6 +1,20 @@
 import json
 from pathlib import Path
 
+from src.context.context_budget import ContextBudget
+from src.context.context_selector import ContextSelector
+from src.context.context_size_estimator import ContextSizeEstimator
+from src.context.context_trimmer import ContextTrimmer
+from src.context.path_exclusions import is_excluded
+from src.context.rule_based_context_selector import (
+    RuleBasedContextSelector,
+)
+from src.context.rule_based_context_size_estimator import (
+    RuleBasedContextSizeEstimator,
+)
+from src.context.rule_based_context_trimmer import (
+    RuleBasedContextTrimmer,
+)
 from src.models import (
     AgentDefinition,
     RunDefinition,
@@ -14,6 +28,10 @@ from src.repositories import (
     TextRepository,
 )
 
+# Legacy fallback only (5D-6B-3C): used when a run has no explicit
+# context_files override AND ContextSelector fails to select anything
+# (or raises). The normal path is ContextSelector -> ContextSnapshot,
+# not this fixed list.
 DEFAULT_CONTEXT_FILES = (
     "src/main.py",
     "src/models.py",
@@ -22,28 +40,26 @@ DEFAULT_CONTEXT_FILES = (
     "src/execution.py",
 )
 
-
-EXCLUDED_DIRECTORY_NAMES = {
-    ".git",
-    ".venv",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-}
-
-EXCLUDED_FILE_NAMES = {
-    ".env",
-}
-
-EXCLUDED_SUFFIXES = {
-    ".pyc",
-    ".pyo",
-}
+# Caps how many selected files are attempted per request. Distinct
+# from settings.llm_max_total_tokens in llm_executor.py, which caps
+# cumulative spend across every round of a run - this caps the size
+# of context going into any single request within it. Neither
+# replaces the other.
+DEFAULT_CONTEXT_BUDGET = ContextBudget(max_tokens=12_000)
 
 
 class RunContextBuilder:
-    """Build deterministic, read-only context for one run."""
+    """Build deterministic, read-only context for one run.
+
+    File selection (5D-6B-3C) goes through ContextSelector ->
+    ContextSizeEstimator -> ContextTrimmer rather than the fixed
+    DEFAULT_CONTEXT_FILES list. An explicit run.metadata["context_files"]
+    override always wins over the selector - that's an unchanged,
+    deliberate manual choice. If the selector path produces nothing
+    (empty selection, or the selector raises), this falls back to
+    DEFAULT_CONTEXT_FILES rather than leaving the agent with no
+    context at all.
+    """
 
     def __init__(
         self,
@@ -56,6 +72,10 @@ class RunContextBuilder:
         tree_max_depth: int = 3,
         max_file_characters: int = 20_000,
         max_snapshot_characters: int = 120_000,
+        selector: ContextSelector | None = None,
+        estimator: ContextSizeEstimator | None = None,
+        trimmer: ContextTrimmer | None = None,
+        budget: ContextBudget | None = None,
     ) -> None:
         if tree_max_depth <= 0:
             raise ValueError(
@@ -82,6 +102,12 @@ class RunContextBuilder:
         self._max_snapshot_characters = (
             max_snapshot_characters
         )
+        self._selector = selector or RuleBasedContextSelector()
+        self._estimator = estimator or RuleBasedContextSizeEstimator()
+        self._trimmer = trimmer or RuleBasedContextTrimmer(
+            self._estimator
+        )
+        self._budget = budget or DEFAULT_CONTEXT_BUDGET
 
     def build(
         self,
@@ -110,8 +136,7 @@ class RunContextBuilder:
             task.id
         )
 
-
-        context_files = self._resolve_context_files(run)
+        context_files = self._resolve_context_files(run, task)
 
         project_snapshot = self._build_project_snapshot(
             context_files
@@ -143,13 +168,14 @@ class RunContextBuilder:
     def _resolve_context_files(
         self,
         run: RunDefinition,
+        task: TaskDefinition,
     ) -> tuple[str, ...]:
         raw_context_files = run.metadata.get(
             "context_files"
         )
 
         if raw_context_files is None:
-            return self._context_files
+            return self._select_context_files(task)
 
         if not isinstance(raw_context_files, list):
             raise ValueError(
@@ -187,6 +213,32 @@ class RunContextBuilder:
 
         return tuple(resolved_files)
 
+    def _select_context_files(
+        self, task: TaskDefinition
+    ) -> tuple[str, ...]:
+        # A selector failure must never leave a run with no context
+        # at all, so any exception here - not just ones we've
+        # anticipated - falls back to the legacy fixed file list.
+        try:
+            snapshot = self._selector.select(
+                task.description, self._project_root
+            )
+
+            if (
+                self._estimator.estimate(snapshot)
+                > self._budget.max_tokens
+            ):
+                snapshot = self._trimmer.trim(
+                    snapshot, self._budget
+                )
+        except Exception:
+            return self._context_files
+
+        if not snapshot.files:
+            return self._context_files
+
+        return tuple(file.path for file in snapshot.files)
+
     def _validate_context_path(
         self,
         relative_path: str,
@@ -205,7 +257,7 @@ class RunContextBuilder:
                 f"project root: {relative_path}"
             )
 
-        if self._is_excluded(path):
+        if is_excluded(path):
             raise ValueError(
                 f"Context path is excluded: "
                 f"{relative_path}"
@@ -315,7 +367,7 @@ class RunContextBuilder:
                 self._project_root
             )
 
-            if self._is_excluded(relative_path):
+            if is_excluded(relative_path):
                 continue
 
             if len(relative_path.parts) > self._tree_max_depth:
@@ -377,18 +429,5 @@ class RunContextBuilder:
             tool_policy,
             indent=2,
             ensure_ascii=False,
-        )
-
-    @staticmethod
-    def _is_excluded(relative_path: Path) -> bool:
-        if relative_path.name in EXCLUDED_FILE_NAMES:
-            return True
-
-        if relative_path.suffix in EXCLUDED_SUFFIXES:
-            return True
-
-        return any(
-            part in EXCLUDED_DIRECTORY_NAMES
-            for part in relative_path.parts
         )
 

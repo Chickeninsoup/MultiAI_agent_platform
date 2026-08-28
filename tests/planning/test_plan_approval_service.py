@@ -3,16 +3,26 @@ from __future__ import annotations
 from src.planning.plan_approval_service import PlanApprovalService
 from src.planning.plan_review import PlanReview
 from src.planning.plan_validation import PlanValidationResult
+from src.planning.validation_error import ValidationError
 from src.task_plan import TaskPlan
 
 
 def _review(*, valid: bool = True) -> PlanReview:
+    errors = (
+        []
+        if valid
+        else [
+            ValidationError(
+                code="UNKNOWN_AGENT",
+                message="Unknown agent: agent-x",
+                repairable=True,
+            )
+        ]
+    )
     return PlanReview(
         plan=TaskPlan(task_id="task-1", steps=[]),
         validation=PlanValidationResult(
-            valid=valid,
-            errors=[] if valid else ["Unknown agent: agent-x"],
-            warnings=[],
+            valid=valid, errors=errors, warnings=[]
         ),
         summary="summary",
     )

@@ -179,6 +179,7 @@ def test_created_task_executes_through_real_run_service(
                 "owner": "owner-1",
                 "status": "ready",
                 "role": "coder",
+                "template_id": "coder",
                 "default_model": "claude-model-placeholder",
                 "credential_id": "cred-1",
                 "system_prompt_path": "system-prompt.md",

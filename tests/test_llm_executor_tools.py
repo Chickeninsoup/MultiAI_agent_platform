@@ -131,18 +131,22 @@ def test_executes_tool_and_continues_llm_loop() -> None:
     assert result.total_output_tokens == 5 + 6
 
     assert [event["type"] for event in result.events] == [
+        "compaction_report",
+        "context_usage",
         "llm_response",
         "tool_call",
         "tool_result",
+        "compaction_report",
+        "context_usage",
         "llm_response",
         "run_completed",
     ]
 
-    tool_call_event = result.events[1]
+    tool_call_event = result.events[3]
     assert tool_call_event["name"] == "read_file"
     assert tool_call_event["input"] == {"path": "example.txt"}
 
-    tool_result_event = result.events[2]
+    tool_result_event = result.events[4]
     assert tool_result_event["name"] == "read_file"
     assert tool_result_event["success"] is True
     assert tool_result_event["output_chars"] == len("1: hello")
@@ -495,10 +499,14 @@ def test_write_file_result_emits_file_mutation_event() -> None:
 
     event_types = [event["type"] for event in sink.events]
     assert event_types == [
+        "compaction_report",
+        "context_usage",
         "llm_response",
         "tool_call",
         "tool_result",
         "file_mutation",
+        "compaction_report",
+        "context_usage",
         "llm_response",
         "run_completed",
     ]

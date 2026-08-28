@@ -1,0 +1,2 @@
+class AgentTemplateNotFoundError(ValueError):
+    pass

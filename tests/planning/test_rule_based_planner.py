@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.planning.rule_based_planner import RuleBasedPlanner
+from src.planning.task_planning_context import TaskPlanningContext
 from src.task_plan import TaskPlan
 
 
@@ -35,6 +36,17 @@ def test_create_plan_step_description_carries_the_request() -> None:
     plan = planner.create_plan("Build a web scraper", task_id="task-001")
 
     assert plan.steps[0].description == "Build a web scraper"
+
+
+def test_create_plan_accepts_and_ignores_task_planning_context() -> None:
+    planner = RuleBasedPlanner()
+    context = TaskPlanningContext(task_id="task-001", available_agents=[])
+
+    plan = planner.create_plan(
+        "Build a web scraper", task_id="task-001", context=context
+    )
+
+    assert plan.steps[0].agent_id == "agent-coder"
 
 
 def test_coding_request_uses_coder() -> None:

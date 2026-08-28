@@ -3,6 +3,14 @@ from pathlib import Path
 
 from src.agent_registry import AgentRegistry
 from src.agent_runtime_factory import AgentRuntimeFactory
+from src.agents.agent_template_repository import (
+    AgentTemplateRepository,
+)
+from src.agents.task_agent_cleanup_service import (
+    TaskAgentCleanupService,
+)
+from src.agents.task_agent_registry import TaskAgentRegistry
+from src.agents.task_agent_team_lifecycle import TaskAgentTeamLifecycle
 from src.cli.run_display import format_run_inspection, format_run_list
 from src.config.settings import Settings
 from src.context_builder import RunContextBuilder
@@ -10,11 +18,20 @@ from src.domain.events.event_repository import EventRepository
 from src.domain.events.timeline_builder import TimelineBuilder
 from src.executor_factory import create_run_executor
 from src.manager_agent import ManagerAgent
-from src.message_router import MessageRouter
-from src.planning.approved_plan_executor import ApprovedPlanExecutor
+from src.planning.approval_repository import ApprovalRepository
+from src.planning.persistent_approval_service import (
+    PersistentApprovalService,
+)
 from src.planning.plan_approval_service import PlanApprovalService
+from src.planning.plan_execution_service import PlanExecutionService
+from src.planning.task_completion_service import TaskCompletionService
+from src.planning.plan_repository import PlanRepository
 from src.planning.plan_review_service import PlanReviewService
+from src.planning.plan_service import PlanService
 from src.planning.plan_validator import PlanValidator
+from src.planning.task_planning_context_factory import (
+    TaskPlanningContextFactory,
+)
 from src.repositories import (
     AgentRepository,
     RunRepository,
@@ -30,9 +47,7 @@ from src.run_service import RunExecutionFailedError, RunService
 from src.step_execution_result import StepExecutionResult
 from src.task_dependency_resolver import TaskDependencyResolver
 from src.task_plan_converter import TaskPlanConverter
-from src.task_plan_executor import TaskPlanExecutor
-from src.task_scheduler import TaskScheduler
-from src.task_service import TaskService
+from src.task_service import TaskAlreadyExistsError, TaskService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -85,23 +100,49 @@ task_service = TaskService(
     task_repository=task_repository,
     run_repository=run_repository,
 )
+task_agent_registry = TaskAgentRegistry()
 agent_runtime_factory = AgentRuntimeFactory(
     agent_registry=agent_registry,
+    task_agent_registry=task_agent_registry,
     task_service=task_service,
     run_service=run_service,
 )
 
 manager_agent = ManagerAgent()
-plan_review_service = PlanReviewService(PlanValidator(agent_registry))
+agent_template_repository = AgentTemplateRepository()
+task_agent_team_lifecycle = TaskAgentTeamLifecycle(task_agent_registry)
+task_planning_context_factory = TaskPlanningContextFactory(
+    task_agent_registry, agent_template_repository
+)
+plan_review_service = PlanReviewService(
+    PlanValidator(agent_registry, task_agent_registry)
+)
 plan_approval_service = PlanApprovalService()
-approved_plan_executor = ApprovedPlanExecutor(
-    TaskScheduler(
-        TaskDependencyResolver(),
-        TaskPlanExecutor(
-            TaskPlanConverter(),
-            MessageRouter(agent_runtime_factory.create_handlers()),
-        ),
-    )
+
+plan_repository = PlanRepository(TASKS_DIR)
+approval_repository = ApprovalRepository(TASKS_DIR)
+plan_service = PlanService(
+    plan_review_service,
+    plan_repository,
+    manager_agent,
+    task_planning_context_factory,
+    task_agent_team_lifecycle,
+)
+persistent_approval_service = PersistentApprovalService(
+    approval_repository, plan_approval_service
+)
+plan_execution_service = PlanExecutionService(
+    plan_repository,
+    approval_repository,
+    plan_review_service,
+    agent_runtime_factory,
+    task_agent_registry,
+    TaskDependencyResolver(),
+    TaskPlanConverter(),
+)
+task_completion_service = TaskCompletionService(task_repository)
+task_agent_cleanup_service = TaskAgentCleanupService(
+    task_repository, task_agent_registry, task_agent_team_lifecycle
 )
 
 
@@ -119,6 +160,36 @@ def list_tasks() -> None:
             f"{task.current_run_id or '-'} | "
             f"{task.title}"
         )
+
+
+def init_task(
+    task_id: str,
+    agent_id: str,
+    title: str,
+    *,
+    description: str | None,
+    input_text: str | None,
+    created_by: str,
+    workspace_id: str,
+    priority: str,
+    tags: list[str],
+) -> None:
+    task, run = task_service.create_task_and_run(
+        task_id=task_id,
+        title=title,
+        description=description or title,
+        agent_id=agent_id,
+        input_text=input_text or title,
+        created_by=created_by,
+        workspace_id=workspace_id,
+        priority=priority,
+        tags=tags,
+    )
+
+    print(f"Task created: {task.id}")
+    print(f"Run created:  {run.id}")
+    print()
+    print(f"Run with: python -m src.main run {task.id}")
 
 
 def _print_run_result(result) -> None:
@@ -232,28 +303,92 @@ def _print_step_results(results: list[StepExecutionResult]) -> None:
             print(f"  Error: {result.error}")
 
 
+_PLAN_STATUS_LABELS = {"pending": "PENDING_APPROVAL"}
+
+
+def _format_plan_status(status: str) -> str:
+    return _PLAN_STATUS_LABELS.get(status, status.upper())
+
+
 def plan_task(task_id: str, request: str) -> None:
-    plan = manager_agent.plan(request, task_id=task_id)
-    review = plan_review_service.create_review(plan)
+    record = plan_service.create_plan(task_id, request)
+    review = plan_service.create_review(record.plan)
 
     print(review.summary)
     print()
+    print("Plan created.")
+    print()
+    print(f"Task: {record.task_id}")
+    print(f"Status: {_format_plan_status(record.status)}")
+    print()
+    print(f"Use: approve-plan {record.task_id}")
+    print(f"Or:  reject-plan {record.task_id}")
 
-    if review.validation.valid:
-        prompt = "Approve? [y/N]: "
-    else:
-        prompt = "Validation FAILED. Override and execute anyway? [y/N]: "
 
-    answer = input(prompt).strip().lower()
+def list_pending_plans() -> None:
+    records = plan_service.get_pending_plans()
 
-    if answer in {"y", "yes"}:
-        approval = plan_approval_service.approve(review)
-        results = approved_plan_executor.execute(approval)
+    if not records:
+        print("No pending plans.")
+        return
+
+    for record in records:
+        step_count = len(record.plan.steps)
+        summary = (
+            record.plan.steps[0].description
+            if record.plan.steps
+            else "(no steps)"
+        )
+
+        print(record.task_id)
+        print(summary)
+        print(f"{step_count} step(s)")
+        print(record.status)
         print()
-        _print_step_results(results)
-    else:
-        plan_approval_service.reject(review)
-        print("Plan rejected.")
+
+
+def approve_plan(task_id: str) -> None:
+    record = plan_service.get_plan(task_id)
+
+    if record is None:
+        print(f"No plan found for task: {task_id}")
+        return
+
+    review = plan_service.create_review(record.plan)
+    persistent_approval_service.approve_and_save(review)
+    plan_service.update_status(task_id, "approved")
+
+    print(f"Plan approved: {task_id}")
+    print()
+    print("Execution started.")
+    print()
+
+    execution_result = plan_execution_service.execute(task_id)
+
+    _print_step_results(execution_result.step_results)
+
+    task_completed = task_completion_service.complete_if_successful(
+        task_id, execution_result
+    )
+
+    if task_completed:
+        task_agent_cleanup_service.cleanup(task_id)
+
+    plan_service.update_status(task_id, "executed")
+
+
+def reject_plan(task_id: str) -> None:
+    record = plan_service.get_plan(task_id)
+
+    if record is None:
+        print(f"No plan found for task: {task_id}")
+        return
+
+    review = plan_service.create_review(record.plan)
+    persistent_approval_service.reject_and_save(review)
+    plan_service.update_status(task_id, "rejected")
+
+    print(f"Plan rejected: {task_id}")
 
 
 def list_runs() -> None:
@@ -281,6 +416,66 @@ def build_parser() -> argparse.ArgumentParser:
         help="List all tasks.",
     )
 
+    init_task_parser = subparsers.add_parser(
+        "init-task",
+        help=(
+            "Create a new Task and its first Run (run-001) without "
+            "executing it. Use 'run' to execute it afterward."
+        ),
+    )
+
+    init_task_parser.add_argument(
+        "task_id",
+        help="Task ID to create, for example task-20260821-001.",
+    )
+
+    init_task_parser.add_argument(
+        "agent_id",
+        help="Agent ID to assign the task and its first run to.",
+    )
+
+    init_task_parser.add_argument(
+        "title",
+        help="Short task title.",
+    )
+
+    init_task_parser.add_argument(
+        "--description",
+        default=None,
+        help="Task description. Defaults to the title.",
+    )
+
+    init_task_parser.add_argument(
+        "--input",
+        dest="input_text",
+        default=None,
+        help="Input text for the first run. Defaults to the title.",
+    )
+
+    init_task_parser.add_argument(
+        "--created-by",
+        default="cli",
+        help="Creator identifier recorded on the task. Defaults to 'cli'.",
+    )
+
+    init_task_parser.add_argument(
+        "--workspace-id",
+        default="workspace-main",
+        help="Workspace ID. Defaults to 'workspace-main'.",
+    )
+
+    init_task_parser.add_argument(
+        "--priority",
+        default="normal",
+        help="Task priority. Defaults to 'normal'.",
+    )
+
+    init_task_parser.add_argument(
+        "--tags",
+        default="",
+        help="Comma-separated tags, for example 'bug,urgent'.",
+    )
+
     run_parser = subparsers.add_parser(
         "run",
         help="Execute the current run for a task.",
@@ -294,8 +489,8 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser = subparsers.add_parser(
         "plan",
         help=(
-            "Generate a TaskPlan for a request, show it for approval, "
-            "and execute it once approved."
+            "Generate a TaskPlan for a request and save it as "
+            "pending approval. Does not execute - use approve-plan."
         ),
     )
 
@@ -307,6 +502,33 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument(
         "request",
         help="Natural-language description of the work to plan.",
+    )
+
+    subparsers.add_parser(
+        "plans",
+        help="List all plans awaiting approval.",
+    )
+
+    approve_plan_parser = subparsers.add_parser(
+        "approve-plan",
+        help=(
+            "Approve a pending plan and execute it immediately."
+        ),
+    )
+
+    approve_plan_parser.add_argument(
+        "task_id",
+        help="Task ID whose plan to approve, for example task-001.",
+    )
+
+    reject_plan_parser = subparsers.add_parser(
+        "reject-plan",
+        help="Reject a pending plan without executing it.",
+    )
+
+    reject_plan_parser.add_argument(
+        "task_id",
+        help="Task ID whose plan to reject, for example task-001.",
     )
 
     resume_parser = subparsers.add_parser(
@@ -360,10 +582,28 @@ def main() -> None:
     try:
         if args.command == "list":
             list_tasks()
+        elif args.command == "init-task":
+            init_task(
+                args.task_id,
+                args.agent_id,
+                args.title,
+                description=args.description,
+                input_text=args.input_text,
+                created_by=args.created_by,
+                workspace_id=args.workspace_id,
+                priority=args.priority,
+                tags=[tag for tag in args.tags.split(",") if tag],
+            )
         elif args.command == "run":
             run_task(args.task_id)
         elif args.command == "plan":
             plan_task(args.task_id, args.request)
+        elif args.command == "plans":
+            list_pending_plans()
+        elif args.command == "approve-plan":
+            approve_plan(args.task_id)
+        elif args.command == "reject-plan":
+            reject_plan(args.task_id)
         elif args.command == "resume":
             resume_run(args.run_id)
         elif args.command == "review":
@@ -388,7 +628,13 @@ def main() -> None:
             print(f"Retry with: python -m src.main resume {error.run_id}")
 
         parser.exit(status=1)
-    except (FileNotFoundError, ValueError, KeyError, RuntimeError) as error:
+    except (
+        FileNotFoundError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+        TaskAlreadyExistsError,
+    ) as error:
         parser.exit(
             status=1,
             message=f"Error: {error}\n",

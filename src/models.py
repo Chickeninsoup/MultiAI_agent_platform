@@ -150,6 +150,7 @@ class AgentDefinition:
     owner: str
     status: str
     role: str
+    template_id: str
     default_model: str
     credential_id: str
     system_prompt_path: str
@@ -183,6 +184,11 @@ class AgentDefinition:
             owner=require_non_empty_string(data, "owner", "Agent"),
             status=require_non_empty_string(data, "status", "Agent"),
             role=require_non_empty_string(data, "role", "Agent"),
+            template_id=require_non_empty_string(
+                data,
+                "template_id",
+                "Agent",
+            ),
             default_model=require_non_empty_string(
                 data,
                 "default_model",
@@ -233,6 +239,7 @@ class AgentDefinition:
             "owner": self.owner,
             "status": self.status,
             "role": self.role,
+            "template_id": self.template_id,
             "default_model": self.default_model,
             "credential_id": self.credential_id,
             "system_prompt_path": self.system_prompt_path,

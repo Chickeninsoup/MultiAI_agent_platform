@@ -6,6 +6,7 @@ import pytest
 
 from src.planning.plan_review import PlanReview
 from src.planning.plan_validation import PlanValidationResult
+from src.planning.validation_error import ValidationError
 from src.task_plan import TaskPlan
 
 
@@ -36,8 +37,13 @@ def test_plan_review_is_frozen() -> None:
 
 
 def test_plan_review_can_hold_an_invalid_validation() -> None:
+    error = ValidationError(
+        code="UNKNOWN_AGENT",
+        message="Unknown agent",
+        repairable=True,
+    )
     validation = PlanValidationResult(
-        valid=False, errors=["Unknown agent"], warnings=[]
+        valid=False, errors=[error], warnings=[]
     )
 
     review = PlanReview(
@@ -47,4 +53,4 @@ def test_plan_review_can_hold_an_invalid_validation() -> None:
     )
 
     assert review.validation.valid is False
-    assert review.validation.errors == ["Unknown agent"]
+    assert review.validation.errors == [error]

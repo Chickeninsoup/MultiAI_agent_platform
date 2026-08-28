@@ -24,3 +24,13 @@ def test_retry_policy_is_frozen() -> None:
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         policy.max_attempts = 5
+
+
+def test_zero_attempts_is_invalid() -> None:
+    with pytest.raises(ValueError):
+        RetryPolicy(max_attempts=0)
+
+
+def test_negative_attempts_is_invalid() -> None:
+    with pytest.raises(ValueError):
+        RetryPolicy(max_attempts=-1)

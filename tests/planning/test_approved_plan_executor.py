@@ -3,6 +3,9 @@ from __future__ import annotations
 import pytest
 
 from src.agent_message import AgentMessage
+from src.agents.task_agent import TaskAgent
+from src.agents.task_agent_registry import TaskAgentRegistry
+from src.failure_classifier import FailureClassifier
 from src.message_router import MessageRouter
 from src.planning.approved_plan_executor import ApprovedPlanExecutor
 from src.planning.plan_approval import PlanApproval
@@ -94,11 +97,18 @@ def test_rejected_plan_is_blocked() -> None:
 
 def test_approved_plan_runs_through_a_real_scheduler() -> None:
     agent = FakeAgent("agent-coder", "done")
+    registry = TaskAgentRegistry()
+    registry.assign_agent(
+        TaskAgent(
+            agent_id="agent-coder", task_id="task-1", template_id="t"
+        )
+    )
     scheduler = TaskScheduler(
         TaskDependencyResolver(),
         TaskPlanExecutor(
-            TaskPlanConverter(), MessageRouter([agent])
+            TaskPlanConverter(), MessageRouter([agent], registry)
         ),
+        FailureClassifier(),
     )
     executor = ApprovedPlanExecutor(scheduler)
     approval = PlanApproval(review=_review(), status="approved")

@@ -1,0 +1,2 @@
+class TaskAgentTeamStateError(ValueError):
+    pass

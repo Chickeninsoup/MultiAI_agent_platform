@@ -3,6 +3,27 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from src.context.context_usage_builder import ContextUsageBuilder
+from src.context.history.apply_compaction_plan import (
+    apply_compaction_plan,
+)
+from src.context.history.char_based_history_size_estimator import (
+    CharBasedHistorySizeEstimator,
+)
+from src.context.history.compaction_report_builder import (
+    CompactionReportBuilder,
+)
+from src.context.history.history_budget import HistoryBudget
+from src.context.history.history_compactor import HistoryCompactor
+from src.context.history.history_size_estimator import (
+    HistorySizeEstimator,
+)
+from src.context.history.message_group_builder import (
+    MessageGroupBuilder,
+)
+from src.context.history.rule_based_history_compactor import (
+    RuleBasedHistoryCompactor,
+)
 from src.domain.tools.tool_call import ToolCall
 from src.llm.base import LLMProvider
 from src.llm.types import (
@@ -12,6 +33,16 @@ from src.llm.types import (
 )
 from src.run_events import NullRunEventSink, RunEvent, RunEventSink
 from src.services.tools.tool_executor import ToolExecutor
+
+# A per-request cap on the compacted history view sent to the
+# provider - deliberately well above ContextBudget's static-snapshot
+# default (12_000, in src/context_builder.py) so the mandatory
+# initial-task group (which embeds that static snapshot) still leaves
+# room for a few rounds of tool-call history, and well below
+# max_total_tokens' cumulative 100_000 ceiling. A placeholder worth
+# tuning once this is exercised against real runs, not a derived
+# constant.
+DEFAULT_HISTORY_BUDGET = HistoryBudget(max_tokens=40_000)
 
 
 class LLMRunLimitError(RuntimeError):
@@ -39,6 +70,13 @@ class LLMRunExecutor:
         max_total_tokens: int = 100_000,
         event_sink: RunEventSink | None = None,
         debug_log_full_output: bool = False,
+        history_compactor: HistoryCompactor | None = None,
+        history_budget: HistoryBudget | None = None,
+        size_estimator: HistorySizeEstimator | None = None,
+        context_usage_builder: ContextUsageBuilder | None = None,
+        compaction_report_builder: CompactionReportBuilder | None = (
+            None
+        ),
     ) -> None:
         self._provider = provider
         self._tool_executor = tool_executor
@@ -50,6 +88,40 @@ class LLMRunExecutor:
             else NullRunEventSink()
         )
         self._debug_log_full_output = debug_log_full_output
+        self._size_estimator = (
+            size_estimator
+            if size_estimator is not None
+            else CharBasedHistorySizeEstimator()
+        )
+        self._history_compactor = (
+            history_compactor
+            if history_compactor is not None
+            else RuleBasedHistoryCompactor(
+                size_estimator=self._size_estimator
+            )
+        )
+        self._history_budget = (
+            history_budget
+            if history_budget is not None
+            else DEFAULT_HISTORY_BUDGET
+        )
+        self._context_usage_builder = (
+            context_usage_builder
+            if context_usage_builder is not None
+            else ContextUsageBuilder(self._size_estimator)
+        )
+        self._compaction_report_builder = (
+            compaction_report_builder
+            if compaction_report_builder is not None
+            else CompactionReportBuilder(self._size_estimator)
+        )
+        # Rebuilds the same groups history_compactor built internally,
+        # purely to explain its decision - HistoryCompactor's Protocol
+        # only returns a flat CompactionPlan (message indices), not
+        # the group-level positions CompactionReportBuilder needs, so
+        # this recomputes them independently rather than widening that
+        # Protocol just for reporting.
+        self._report_group_builder = MessageGroupBuilder()
         self._events: list[RunEvent] = []
 
     def _emit_event(self, event: RunEvent) -> None:
@@ -86,10 +158,74 @@ class LLMRunExecutor:
         tool_calls = 0
 
         while True:
+            plan = self._history_compactor.compact(
+                messages, self._history_budget
+            )
+            request_messages = apply_compaction_plan(messages, plan)
+
+            report_groups = self._report_group_builder.build(messages)
+            retained_set = set(plan.retained_indices)
+            retained_positions = [
+                position
+                for position, group in enumerate(report_groups)
+                if all(
+                    index in retained_set for index in group.indices
+                )
+            ]
+            compaction_report = self._compaction_report_builder.build(
+                messages, report_groups, retained_positions
+            )
+
+            self._emit_event(
+                {
+                    "type": "compaction_report",
+                    "round": llm_rounds + 1,
+                    "retained_count": compaction_report.retained_count,
+                    "removed_count": compaction_report.removed_count,
+                    "original_tokens": (
+                        compaction_report.original_tokens
+                    ),
+                    "retained_tokens": (
+                        compaction_report.retained_tokens
+                    ),
+                    "retained_groups": (
+                        compaction_report.retained_groups
+                    ),
+                    "removed_groups": compaction_report.removed_groups,
+                }
+            )
+
             current_request = replace(
                 request,
-                messages=list(messages),
+                messages=request_messages,
                 tools=self._tool_executor.get_definitions(),
+            )
+
+            breakdown = self._context_usage_builder.build(
+                current_request, messages
+            )
+
+            self._emit_event(
+                {
+                    "type": "context_usage",
+                    "round": llm_rounds + 1,
+                    "system_prompt_tokens": (
+                        breakdown.system_prompt_tokens
+                    ),
+                    "tool_definition_tokens": (
+                        breakdown.tool_definition_tokens
+                    ),
+                    "initial_message_tokens": (
+                        breakdown.initial_message_tokens
+                    ),
+                    "history_before_tokens": (
+                        breakdown.history_before_tokens
+                    ),
+                    "history_after_tokens": (
+                        breakdown.history_after_tokens
+                    ),
+                    "total_sent_tokens": breakdown.total_sent_tokens,
+                }
             )
 
             response = self._provider.complete(current_request)
