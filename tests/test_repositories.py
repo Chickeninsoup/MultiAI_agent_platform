@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
-from src.repositories import AgentRepository
+from src.repositories import AgentRepository, JsonRepository
 
 
 def _write_agent(
@@ -116,3 +117,82 @@ def test_list_all_against_real_agents_directory() -> None:
         "agent-general",
         "agent-coder",
     }
+
+
+# --- JsonRepository.create_exclusive ---------------------------------
+
+
+def test_create_exclusive_creates_file_and_returns_true(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "nested" / "claim.json"
+
+    created = JsonRepository.create_exclusive(target, {"a": 1})
+
+    assert created is True
+    assert json.loads(target.read_text(encoding="utf-8")) == {"a": 1}
+
+
+def test_create_exclusive_returns_false_without_overwriting(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "claim.json"
+    JsonRepository.create_exclusive(target, {"a": 1})
+
+    created_again = JsonRepository.create_exclusive(target, {"a": 2})
+
+    assert created_again is False
+    assert json.loads(target.read_text(encoding="utf-8")) == {"a": 1}
+
+
+def test_create_exclusive_only_one_winner_among_concurrent_callers(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "claim.json"
+
+    results = [
+        JsonRepository.create_exclusive(target, {"owner": i})
+        for i in range(10)
+    ]
+
+    assert results.count(True) == 1
+    assert results.count(False) == 9
+
+
+def test_save_concurrent_writers_do_not_race_on_shared_tmp_name(
+    tmp_path: Path,
+) -> None:
+    """Regression for 5E-5D-6C-1: save() used to build its tmp file
+    name from file_path.suffix alone, so two threads/processes
+    concurrently saving the *same* file_path shared one tmp path -
+    whichever replace() ran second found the first had already
+    consumed it, raising FileNotFoundError. A barrier-released burst
+    of concurrent writers must now all succeed."""
+
+    target = tmp_path / "shared.json"
+    barrier = threading.Barrier(8)
+    errors: list[Exception] = []
+    errors_lock = threading.Lock()
+
+    def writer(index: int) -> None:
+        barrier.wait(timeout=5)
+        try:
+            JsonRepository.save(target, {"writer": index})
+        except Exception as exc:  # noqa: BLE001
+            with errors_lock:
+                errors.append(exc)
+
+    threads = [
+        threading.Thread(target=writer, args=(i,)) for i in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    # Exactly one final, well-formed, complete write survives.
+    final = json.loads(target.read_text(encoding="utf-8"))
+    assert "writer" in final
+    # No stray tmp files left behind.
+    assert list(tmp_path.glob("*.tmp")) == []

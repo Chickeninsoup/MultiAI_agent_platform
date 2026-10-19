@@ -56,8 +56,25 @@ class ToolExecutor:
             if self._tool_policy.is_enabled(name)
         ]
 
+    def is_authorized(self, tool_call: ToolCall) -> bool:
+        """Whether tool_call would currently be allowed to execute,
+        without executing it (5E-5D-4B) - the same two checks
+        execute() already performs inline (a registered handler
+        exists, and ToolPolicy.is_enabled() allows it), exposed as a
+        pure query. Added so a caller deciding whether to consult a
+        ToolApprovalGate (an entirely separate, later question - see
+        ToolApprovalGate's own docstring) can ask "is this even
+        authorized" first, without reimplementing ToolPolicy's logic
+        in a different layer. execute()'s own inline checks are
+        unchanged by this - this is a pure addition, not a refactor
+        of execute()'s existing control flow.
+        """
 
-    
+        return (
+            tool_call.name in self._handlers
+            and self._tool_policy.is_enabled(tool_call.name)
+        )
+
     def execute(self, tool_call: ToolCall) -> ToolResult:
         start = time.perf_counter()
         result = self._execute(tool_call)

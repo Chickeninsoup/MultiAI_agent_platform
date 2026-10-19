@@ -42,6 +42,13 @@ class LLMMessage:
     role: LLMRole
     content: str | list[dict[str, Any]]
 
+    def to_dict(self) -> dict[str, Any]:
+        return {"role": self.role, "content": self.content}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "LLMMessage":
+        return cls(role=data["role"], content=data["content"])
+
 
 @dataclass(frozen=True)
 class LLMRequest:

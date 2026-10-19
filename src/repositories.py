@@ -1,4 +1,6 @@
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -6,6 +8,63 @@ from src.models import AgentDefinition, RunDefinition, TaskDefinition
 
 class JsonRepository:
     """Read and write JSON documents from the local filesystem."""
+
+    @staticmethod
+    def create_exclusive(file_path: Path, data: dict[str, Any]) -> bool:
+        """Atomically create file_path with data if and only if it does
+        not already exist (5E-5D-6B) - the one primitive save() cannot
+        provide: save() is always a create-or-overwrite (tmp file then
+        os.replace()), which makes it unsuitable for claim acquisition,
+        where two processes racing to create the same path must never
+        both succeed.
+
+        Built on os.open(path, O_CREAT | O_EXCL), not
+        file_path.exists() followed by a plain save() - an
+        exists()-then-write check-then-act has a race window between
+        the check and the write that two concurrent processes can both
+        pass through; O_EXCL makes "does this path already have a
+        file" and "create it" a single atomic kernel syscall, so
+        exactly one of two simultaneous callers can ever win.
+
+        Returns True if this call created the file (the caller is the
+        new, sole owner of whatever claim this file represents),
+        False if a file already existed at that path (left completely
+        untouched - this function never overwrites, truncates, or
+        inspects an existing file's contents).
+
+        This guarantees safety against *process-level* races on a
+        POSIX filesystem (two processes, or two threads, calling this
+        concurrently for the same path). It does not guarantee
+        durability across power loss: the write below is not fsync'd,
+        matching every other JsonRepository method in this file - "the
+        process was interrupted" is covered, "the machine lost power
+        mid-write" is not, for save() and create_exclusive() alike.
+
+        A failure partway through writing content (after the exclusive
+        create already succeeded) leaves a truncated or empty file in
+        place rather than cleaning it up - deliberately: this function
+        has no way to distinguish "a concurrent reader will never see
+        this" from "a claim now exists that something else depends
+        on," and silently removing a file a caller believes it just
+        created would be far more dangerous than leaving a malformed
+        one for a caller to detect and handle explicitly.
+        """
+
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            file_descriptor = os.open(
+                str(file_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+        except FileExistsError:
+            return False
+
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as file:
+            json.dump(data, file, indent=2, ensure_ascii=False)
+            file.write("\n")
+
+        return True
 
     @staticmethod
     def load(file_path: Path) -> dict[str, Any]:
@@ -33,22 +92,39 @@ class JsonRepository:
 
     @staticmethod
     def save(file_path: Path, data: dict[str, Any]) -> None:
+        """Writes atomically via a tmp-file-then-replace() (so a
+        reader never sees a partially-written file), where the tmp
+        file's name is unique per call (pid + a random token), not a
+        fixed f"{suffix}.tmp" - two processes concurrently save()-ing
+        the *same* file_path (e.g. two Runs under one Task, both
+        updating task.json at once - 5E-5D-6C-1) previously raced on
+        that one shared tmp name: whichever process's replace() ran
+        second would find the first process had already consumed
+        (renamed away) the tmp file out from under it, raising
+        FileNotFoundError. A unique name per call makes that race
+        structurally impossible - each writer only ever touches its
+        own tmp file."""
+
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         temporary_path = file_path.with_suffix(
-            f"{file_path.suffix}.tmp"
+            f"{file_path.suffix}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
         )
 
-        with temporary_path.open("w", encoding="utf-8") as file:
-            json.dump(
-                data,
-                file,
-                indent=2,
-                ensure_ascii=False,
-            )
-            file.write("\n")
+        try:
+            with temporary_path.open("w", encoding="utf-8") as file:
+                json.dump(
+                    data,
+                    file,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                file.write("\n")
 
-        temporary_path.replace(file_path)
+            temporary_path.replace(file_path)
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
 
 
 class TextRepository:

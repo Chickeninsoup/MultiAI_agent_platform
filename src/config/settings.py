@@ -11,19 +11,6 @@ ExecutionMode = Literal["simulated", "llm"]
 LLMProviderName = Literal["anthropic"]
 
 
-def _require_non_empty(
-    value: str | None,
-    variable_name: str,
-) -> str:
-    if value is None or not value.strip():
-        raise ValueError(
-            f"Environment variable {variable_name} "
-            "must be set and non-empty"
-        )
-
-    return value.strip()
-
-
 def _read_positive_int(
     variable_name: str,
     default: int,
@@ -138,6 +125,7 @@ class Settings:
     llm_max_total_tokens: int
     debug_log_full_output: bool
     test_policy_path: str
+    approval_policy_path: str
 
     @classmethod
     def load(
@@ -194,11 +182,16 @@ class Settings:
                 "ANTHROPIC_MODEL must not be empty"
             )
 
-        if execution_mode_raw == "llm":
-            anthropic_api_key = _require_non_empty(
-                anthropic_api_key,
-                "ANTHROPIC_API_KEY",
-            )
+        # Deliberately not validated as required here, even when
+        # execution_mode is "llm" (5E-5D-6D) - Settings.load() runs for
+        # every CLI invocation, including read-only commands (list,
+        # inspect, show-tool-approval, approve/reject/modify/cancel-
+        # tool-call) that never touch a provider at all. Requiring a
+        # key at load time would make those commands demand
+        # credentials they never use. create_llm_provider()
+        # (src/executor_factory.py) still requires a non-empty key -
+        # that check now runs at the one place a provider is actually
+        # about to be constructed, not here.
 
         return cls(
             execution_mode=execution_mode_raw,
@@ -232,6 +225,10 @@ class Settings:
             test_policy_path=os.getenv(
                 "TEST_POLICY_PATH",
                 "src/config/test_policy.json",
+            ).strip(),
+            approval_policy_path=os.getenv(
+                "APPROVAL_POLICY_PATH",
+                "src/config/approval_policy.json",
             ).strip(),
         )
 

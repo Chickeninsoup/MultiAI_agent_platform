@@ -310,3 +310,73 @@ def test_executes_git_status_tool(
 
     assert result.success is True
     assert result.tool_name == "git_status"
+
+
+def test_is_authorized_true_for_registered_enabled_tool(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    executor = create_executor(repository_root)
+
+    assert (
+        executor.is_authorized(
+            ToolCall(id="tool-call-1", name="read_file", input={})
+        )
+        is True
+    )
+
+
+def test_is_authorized_false_for_unknown_tool(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    executor = create_executor(repository_root)
+
+    assert (
+        executor.is_authorized(
+            ToolCall(id="tool-call-2", name="unknown_tool", input={})
+        )
+        is False
+    )
+
+
+def test_is_authorized_false_for_disabled_tool(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    executor = create_executor(
+        repository_root,
+        enabled_tools={"other_tool"},
+    )
+
+    assert (
+        executor.is_authorized(
+            ToolCall(id="tool-call-3", name="read_file", input={})
+        )
+        is False
+    )
+
+
+def test_is_authorized_does_not_execute_the_tool(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+
+    executor = create_executor(repository_root)
+
+    executor.is_authorized(
+        ToolCall(
+            id="tool-call-4",
+            name="read_file",
+            input={"path": "example.txt"},
+        )
+    )
+
+    assert not (repository_root / "example.txt").exists()

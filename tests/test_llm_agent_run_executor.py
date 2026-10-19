@@ -156,6 +156,7 @@ def _build_settings(
         llm_max_total_tokens=100_000,
         debug_log_full_output=debug_log_full_output,
         test_policy_path="test_policy.json",
+        approval_policy_path="approval_policy.json",
     )
 
 
